@@ -114,6 +114,7 @@ export function GiftReading() {
         </p>
 
         {!unlocked && (
+          <>
           <div className="mx-auto mt-6 flex max-w-sm flex-col gap-3 text-left">
             <label className="block">
               <span className="sr-only">Who is it for? (email)</span>
@@ -169,7 +170,30 @@ export function GiftReading() {
               </span>
             </button>
 
-<<<<<<< HEAD
+            {entitlement.status === "awaiting-payment" && (
+              <p className="text-center text-xs leading-relaxed text-gold-200/80">
+                Waiting for Stripe to confirm — this unlocks on its own, usually
+                within a few seconds.
+              </p>
+            )}
+            {entitlement.status === "spent" && (
+              <p className="text-center text-xs leading-relaxed text-cream-100/60">
+                This gift has already been drawn. Send another whenever you like.
+              </p>
+            )}
+            {entitlement.status === "unavailable" && (
+              <p className="text-center text-xs leading-relaxed text-cream-100/60">
+                Checkout is unavailable right now. Please try again in a moment.
+              </p>
+            )}
+            {entitlement.status === "locked" && (
+              <p className="text-center text-xs leading-relaxed text-cream-100/45 italic">
+                Payments are handled securely through Stripe in a new tab. Your
+                card unlocks here the moment the payment clears.
+              </p>
+            )}
+          </div>
+
           <div className="card-scene mt-8 aspect-[3/5] w-full max-w-[8.5rem] sm:max-w-[11rem]">
             <div className={`card-inner ${revealed ? "is-revealed" : ""}`}>
               <div aria-hidden className="card-face card-back" />
@@ -218,31 +242,10 @@ export function GiftReading() {
             ) : (
               <p className="pt-1 text-[11px] text-cream-100/25 italic sm:text-xs">
                 The card waits in shadow
-=======
-            {entitlement.status === "awaiting-payment" && (
-              <p className="text-center text-xs leading-relaxed text-gold-200/80">
-                Waiting for Stripe to confirm — this unlocks on its own, usually
-                within a few seconds.
-              </p>
-            )}
-            {entitlement.status === "spent" && (
-              <p className="text-center text-xs leading-relaxed text-cream-100/60">
-                This gift has already been drawn. Send another whenever you like.
-              </p>
-            )}
-            {entitlement.status === "unavailable" && (
-              <p className="text-center text-xs leading-relaxed text-cream-100/60">
-                Checkout is unavailable right now. Please try again in a moment.
-              </p>
-            )}
-            {entitlement.status === "locked" && (
-              <p className="text-center text-xs leading-relaxed text-cream-100/45 italic">
-                Payments are handled securely through Stripe in a new tab. Your
-                card unlocks here the moment the payment clears.
->>>>>>> acde13353530a4d08985e8c3c488d26ca8edbe7f
               </p>
             )}
           </div>
+          </>
         )}
 
         {/* One-card draw — only once the purchase is verified */}

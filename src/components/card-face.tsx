@@ -18,7 +18,15 @@ export const GLYPH_COLOR: Record<string, string> = {
   Earth: "#c6a055", // gold-500
 };
 
-export function CardFace({ card }: { card: TarotCard | null }) {
+export function CardFace({
+  card,
+  revealed = true,
+}: {
+  card: TarotCard | null;
+  /** Whether the card is face-up. Reserved for reveal-gated rendering; the flip animation itself is handled by the parent. */
+  revealed?: boolean;
+}) {
+  void revealed;
   const [artBroken, setArtBroken] = useState(false);
   const artUrl = card ? artUrlFor(card.id) : null;
   const showArt = !!(card && artUrl && !artBroken);

@@ -310,20 +310,12 @@ export function ExtendedReading() {
                   {POSITION_HINTS[pos.position]}
                 </p>
 
-<<<<<<< HEAD
-              <div className="card-scene mt-4 aspect-[3/5] w-full max-w-[8rem] sm:max-w-[9rem] lg:max-w-[10.5rem]">
-                <div
-                  className={`card-inner ${isRevealed ? "is-revealed" : ""}`}
-                >
-                  <div aria-hidden className="card-face card-back" />
-                  <CardFace card={card} />
-=======
                 <div className="card-scene mt-4 aspect-[3/5] w-full max-w-[8rem] sm:max-w-[9rem] lg:max-w-[10.5rem]">
                   <div
                     className={`card-inner ${isRevealed ? "is-revealed" : ""}`}
                   >
                     <div aria-hidden className="card-face card-back" />
-                    <CardFace card={card} revealed={isRevealed} />
+                    <CardFace card={card} />
                   </div>
                 </div>
 
@@ -363,7 +355,6 @@ export function ExtendedReading() {
                       The card waits in shadow
                     </p>
                   )}
->>>>>>> acde13353530a4d08985e8c3c488d26ca8edbe7f
                 </div>
               </div>
             );

@@ -457,6 +457,9 @@ function Home() {
               {/* Paid reading ladder — Single · Extended · Bundle · Gift */}
               <Pricing />
 
+              {/* Single insight — one-card paid reading */}
+              <SingleInsight />
+
               {/* Gift — one-card paid reading */}
               <GiftReading />
 
