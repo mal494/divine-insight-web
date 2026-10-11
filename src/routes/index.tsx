@@ -5,6 +5,8 @@ import { CardFace } from "~/components/card-face";
 import { DailyCard } from "~/components/daily-card";
 import { ExtendedReading } from "~/components/extended-reading";
 import { GiftReading } from "~/components/gift-reading";
+import { Journal } from "~/components/Journal";
+import { PremiumGate } from "~/components/PremiumGate";
 import { Pricing } from "~/components/pricing";
 import { ReadingPanel } from "~/components/reading-panel";
 import { SingleInsight } from "~/components/single-insight";
@@ -28,7 +30,7 @@ const POSITIONS = [
   { label: "Future", hint: "what is gently emerging" },
 ] as const;
 
-type View = "draw" | "extended" | "gallery";
+type View = "draw" | "extended" | "journal" | "gallery";
 
 const FIRST_REVEAL_DELAY_MS = 450;
 const REVEAL_STAGGER_MS = 700;
@@ -268,6 +270,14 @@ function Home() {
               </button>
               <button
                 type="button"
+                onClick={() => setView("journal")}
+                aria-current={view === "journal" ? "page" : undefined}
+                className={tabCls(view === "journal")}
+              >
+                Journal
+              </button>
+              <button
+                type="button"
                 onClick={openGallery}
                 aria-current={view === "gallery" ? "true" : undefined}
                 className={tabCls(view === "gallery")}
@@ -283,7 +293,14 @@ function Home() {
 
         <main id="top" className="mx-auto w-full max-w-6xl flex-1 px-5 sm:px-8">
           {view === "extended" ? (
-            <ExtendedReading />
+            /* Extended five-card spread — Pro-gated (Celtic Cross / advanced) */
+            <PremiumGate>
+              <ExtendedReading />
+            </PremiumGate>
+          ) : view === "journal" ? (
+            <PremiumGate>
+              <Journal />
+            </PremiumGate>
           ) : (
             <>
               {/* Hero — full-bleed artwork, indigo scrim, copy on the center-left */}
@@ -345,114 +362,123 @@ function Home() {
                       </span>
                     </button>
                     <p className="text-xs text-cream-100/50">
-                      Free three-card reading · Go deeper from $2.99
+                      Daily Card is free · Three-card &amp; Pro from $5/month
                     </p>
                   </div>
                 </div>
               </section>
 
-              {/* Card of the Day — free daily retention strip */}
+              {/* Card of the Day — free daily retention strip (always ungated) */}
               <DailyCard />
 
-              {/* Reading */}
-              <section
-                id="reading"
-                className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
-              >
-                <div className="animate-fade-up text-center">
-                  <p className="text-[10px] tracking-[0.45em] text-gold-400 uppercase sm:text-xs">
-                    The reading
-                  </p>
-                  <h2 className="mt-4 font-display text-4xl font-medium tracking-[0.08em] text-cream-50 sm:text-5xl">
-                    Past · Present · Future
-                  </h2>
-                  <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-                    Hold a question or intention in your mind, then draw. Three
-                    cards from the full deck turn to greet you in turn.
-                  </p>
-                </div>
-
-                <div
-                  aria-live="polite"
-                  className="animate-fade-up mt-10 grid grid-cols-3 items-start gap-3 sm:mt-14 sm:gap-8 lg:gap-14"
-                  style={{ animationDelay: "0.15s" }}
+              {/* Three-card Past · Present · Future — Pro-gated */}
+              <PremiumGate>
+                <section
+                  id="reading"
+                  className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
                 >
-                  {POSITIONS.map((pos, i) => (
-                    <CardSlot
-                      key={pos.label}
-                      position={pos}
-                      card={cards[i] ?? null}
-                      revealed={revealed[i]}
-                    />
-                  ))}
-                </div>
-
-                {phase === "done" && summary && (
-                  <ReadingPanel
-                    summary={summary}
-                    kicker="Woven from your three cards"
-                    title="Your reading"
-                  />
-                )}
-
-                {phase === "done" && summary && (
-                  <div className="animate-fade-up mx-auto mt-8 max-w-2xl rounded-2xl border border-gold-500/20 bg-night-900/40 px-6 py-5 text-center backdrop-blur-sm sm:px-8">
-                    <p className="text-[10px] tracking-[0.45em] text-gold-400/90 uppercase">
-                      This was a glimpse
+                  <div className="animate-fade-up text-center">
+                    <p className="text-[10px] tracking-[0.45em] text-gold-400 uppercase sm:text-xs">
+                      The reading
                     </p>
-                    <h3 className="mt-2 font-display text-2xl font-medium tracking-[0.08em] text-cream-50 sm:text-3xl">
-                      Go deeper
-                    </h3>
-                    <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-cream-100/60">
-                      Your three cards opened a door — a focused or five-card
-                      reading walks further through it.
+                    <h2 className="mt-4 font-display text-4xl font-medium tracking-[0.08em] text-cream-50 sm:text-5xl">
+                      Past · Present · Future
+                    </h2>
+                    <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
+                      Hold a question or intention in your mind, then draw. Three
+                      cards from the full deck turn to greet you in turn.
                     </p>
-                    <div className="mt-4 flex flex-col items-center justify-center gap-3 sm:flex-row">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          document
-                            .getElementById("single-insight")
-                            ?.scrollIntoView({ behavior: "smooth", block: "start" })
-                        }
-                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                      >
-                        Single Insight · ${formatPrice(SINGLE_INSIGHT_PRICE)}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          document
-                            .getElementById("extended-reading")
-                            ?.scrollIntoView({ behavior: "smooth", block: "start" })
-                        }
-                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                      >
-                        Extended Reading · ${formatPrice(EXTENDED_READING_PRICE)}
-                      </button>
-                    </div>
                   </div>
-                )}
 
-                <div className="mt-10 flex min-h-[5rem] flex-col items-center gap-3 sm:mt-14">
-                  {phase === "done" && (
-                    <button
-                      type="button"
-                      onClick={startReading}
-                      className="inline-flex cursor-pointer items-center gap-2.5 rounded-full border border-gold-500/50 px-8 py-3.5 text-sm tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                    >
-                      <span>Draw again</span>
-                      <span aria-hidden>✦</span>
-                    </button>
+                  <div
+                    aria-live="polite"
+                    className="animate-fade-up mt-10 grid grid-cols-3 items-start gap-3 sm:mt-14 sm:gap-8 lg:gap-14"
+                    style={{ animationDelay: "0.15s" }}
+                  >
+                    {POSITIONS.map((pos, i) => (
+                      <CardSlot
+                        key={pos.label}
+                        position={pos}
+                        card={cards[i] ?? null}
+                        revealed={revealed[i]}
+                      />
+                    ))}
+                  </div>
+
+                  {phase === "done" && summary && (
+                    <ReadingPanel
+                      summary={summary}
+                      kicker="Woven from your three cards"
+                      title="Your reading"
+                    />
                   )}
-                  {phase === "done" && (
-                    <p className="text-xs text-cream-100/40">
-                      A fresh shuffle, a new lens — the deck holds all
-                      seventy-eight cards.
-                    </p>
+
+                  {phase === "done" && summary && (
+                    <div className="animate-fade-up mx-auto mt-8 max-w-2xl rounded-2xl border border-gold-500/20 bg-night-900/40 px-6 py-5 text-center backdrop-blur-sm sm:px-8">
+                      <p className="text-[10px] tracking-[0.45em] text-gold-400/90 uppercase">
+                        This was a glimpse
+                      </p>
+                      <h3 className="mt-2 font-display text-2xl font-medium tracking-[0.08em] text-cream-50 sm:text-3xl">
+                        Go deeper
+                      </h3>
+                      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-cream-100/60">
+                        Your three cards opened a door — a focused or five-card
+                        reading walks further through it.
+                      </p>
+                      <div className="mt-4 flex flex-col items-center justify-center gap-3 sm:flex-row">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            document
+                              .getElementById("single-insight")
+                              ?.scrollIntoView({
+                                behavior: "smooth",
+                                block: "start",
+                              })
+                          }
+                          className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                        >
+                          Single Insight · ${formatPrice(SINGLE_INSIGHT_PRICE)}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            document
+                              .getElementById("extended-reading")
+                              ?.scrollIntoView({
+                                behavior: "smooth",
+                                block: "start",
+                              })
+                          }
+                          className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                        >
+                          Extended Reading · $
+                          {formatPrice(EXTENDED_READING_PRICE)}
+                        </button>
+                      </div>
+                    </div>
                   )}
-                </div>
-              </section>
+
+                  <div className="mt-10 flex min-h-[5rem] flex-col items-center gap-3 sm:mt-14">
+                    {phase === "done" && (
+                      <button
+                        type="button"
+                        onClick={startReading}
+                        className="inline-flex cursor-pointer items-center gap-2.5 rounded-full border border-gold-500/50 px-8 py-3.5 text-sm tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        <span>Draw again</span>
+                        <span aria-hidden>✦</span>
+                      </button>
+                    )}
+                    {phase === "done" && (
+                      <p className="text-xs text-cream-100/40">
+                        A fresh shuffle, a new lens — the deck holds all
+                        seventy-eight cards.
+                      </p>
+                    )}
+                  </div>
+                </section>
+              </PremiumGate>
 
               {/* Paid reading ladder — Single · Extended · Bundle · Gift */}
               <Pricing />
