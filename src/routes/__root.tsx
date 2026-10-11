@@ -1,6 +1,8 @@
 import { HeadContent, Outlet, Scripts, createRootRoute } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 import { Analytics } from "~/components/analytics";
+import { PremiumDevToggle } from "~/components/PremiumDevToggle";
+import { SubscriptionProvider } from "~/context/SubscriptionContext";
 import appCss from "~/styles/app.css?url";
 import site from "../../site.json";
 
@@ -80,7 +82,10 @@ export const Route = createRootRoute({
 function RootComponent() {
   return (
     <RootDocument>
-      <Outlet />
+      <SubscriptionProvider>
+        <Outlet />
+        <PremiumDevToggle />
+      </SubscriptionProvider>
     </RootDocument>
   );
 }
