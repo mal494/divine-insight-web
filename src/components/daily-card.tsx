@@ -55,6 +55,7 @@ export function DailyCard() {
 
   return (
     <section
+      id="daily-card"
       aria-label="Card of the Day"
       className="animate-fade-up scroll-mt-24 pb-12 sm:pb-14"
     >
@@ -74,10 +75,10 @@ export function DailyCard() {
           </p>
         </div>
         <a
-          href="#reading"
+          href="#paid-readings"
           className="inline-flex shrink-0 cursor-pointer items-center gap-2.5 rounded-full border border-gold-500/50 px-7 py-3 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98] sm:text-sm"
         >
-          <span>Draw your own three cards</span>
+          <span>Explore paid readings</span>
           <span aria-hidden>✦</span>
         </a>
       </div>

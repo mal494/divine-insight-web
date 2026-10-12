@@ -37,8 +37,8 @@ export function Journal() {
           Journal
         </h2>
         <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-          Every Pro reading lands here — a quiet ledger of questions, spreads,
-          and the threads you chose to keep.
+          Every reading you choose to keep lands here — a quiet ledger of
+          questions, spreads, and the threads you chose to return to.
         </p>
       </div>
 

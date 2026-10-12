@@ -139,6 +139,7 @@ export function Pricing() {
 
   return (
     <section
+      id="paid-readings"
       aria-label="Choose your reading"
       className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
     >
@@ -151,9 +152,8 @@ export function Pricing() {
           Go deeper when you&rsquo;re ready
         </h2>
         <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-          The free three-card reading above is always here for you. When you
-          want a sharper focus or a longer look, the same deck draws for you —
-          at your pace, on your terms.
+          Choose the format that fits the moment: focused one-card insights,
+          extended five-card readings, bundles, or a gift reading.
         </p>
       </div>
 

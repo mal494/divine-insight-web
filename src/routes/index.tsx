@@ -11,6 +11,7 @@ import { Pricing } from "~/components/pricing";
 import { ReadingPanel } from "~/components/reading-panel";
 import { SingleInsight } from "~/components/single-insight";
 import { TipJar } from "~/components/tip-jar";
+import { useSubscription } from "~/context/SubscriptionContext";
 import { DECK, type TarotCard } from "~/data/deck";
 import {
   EXTENDED_READING_PRICE,
@@ -156,6 +157,7 @@ function CardSlot({
 }
 
 function Home() {
+  const { isPremium } = useSubscription();
   const [cards, setCards] = useState<TarotCard[]>([]);
   const [revealed, setRevealed] = useState<boolean[]>([false, false, false]);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -175,6 +177,12 @@ function Home() {
     const pending = timers.current;
     return () => pending.forEach(clearTimeout);
   }, []);
+
+  useEffect(() => {
+    if (!isPremium && view === "journal") {
+      setView("draw");
+    }
+  }, [isPremium, view]);
 
   function startReading() {
     timers.current.forEach(clearTimeout);
@@ -268,14 +276,16 @@ function Home() {
               >
                 Extended
               </button>
-              <button
-                type="button"
-                onClick={() => setView("journal")}
-                aria-current={view === "journal" ? "page" : undefined}
-                className={tabCls(view === "journal")}
-              >
-                Journal
-              </button>
+              {isPremium && (
+                <button
+                  type="button"
+                  onClick={() => setView("journal")}
+                  aria-current={view === "journal" ? "page" : undefined}
+                  className={tabCls(view === "journal")}
+                >
+                  Journal
+                </button>
+              )}
               <button
                 type="button"
                 onClick={openGallery}
@@ -301,7 +311,7 @@ function Home() {
              * Pro subscription gates the three-card spread and Journal instead.
              */
             <ExtendedReading />
-          ) : view === "journal" ? (
+          ) : view === "journal" && isPremium ? (
             <PremiumGate>
               <Journal />
             </PremiumGate>
@@ -312,7 +322,7 @@ function Home() {
                 <div aria-hidden className="hero-bg" />
                 <div className="relative max-w-xl text-left">
                   <p className="animate-fade-up text-[10px] tracking-[0.45em] text-gold-400 uppercase sm:text-xs">
-                    ✦ A three-card reading ✦
+                    ✦ Tarot reflections ✦
                   </p>
                   <h1
                     className="animate-fade-up mt-6 bg-gradient-to-b from-cream-50 via-cream-100 to-gold-300 bg-clip-text font-display text-6xl font-medium tracking-[0.06em] text-transparent sm:text-7xl md:text-8xl"
@@ -330,45 +340,64 @@ function Home() {
                     className="animate-fade-up mt-4 max-w-md text-sm leading-relaxed text-cream-100/60"
                     style={{ animationDelay: "0.25s" }}
                   >
-                    Three cards from the full seventy-eight — the twenty-two
-                    great arcana and all four suits of everyday life. Drawn in a
-                    moment, held for as long as you need them.
+                    Draw from the full seventy-eight — the twenty-two major
+                    arcana and all four suits of everyday life. Return whenever
+                    you want a moment of reflection.
                   </p>
-                  <div
-                    className="animate-fade-up mt-10 flex flex-col items-start gap-3"
-                    style={{ animationDelay: "0.35s" }}
-                  >
-                    <label className="w-full max-w-xs sm:max-w-sm">
-                      <span className="sr-only">
-                        What's on your mind? (optional)
-                      </span>
-                      <input
-                        type="text"
-                        value={question}
-                        onChange={(e) => setQuestion(e.target.value)}
-                        placeholder="What's on your mind? (optional)"
-                        autoComplete="off"
-                        className="w-full rounded-full border border-gold-500/30 bg-night-900/75 px-5 py-3 text-sm text-cream-100 placeholder:text-cream-100/35 transition focus:border-gold-400/70 focus:ring-2 focus:ring-gold-500/25 focus:outline-none"
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      onClick={startReading}
-                      disabled={drawing}
-                      className="group inline-flex cursor-pointer items-center gap-3 rounded-full bg-gradient-to-b from-gold-300 via-gold-400 to-gold-500 px-9 py-4 text-sm font-medium tracking-[0.14em] text-night-950 uppercase shadow-[0_10px_40px_rgba(198,160,85,0.35)] transition hover:shadow-[0_12px_55px_rgba(198,160,85,0.55)] hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 sm:text-base"
+                  {isPremium ? (
+                    <div
+                      className="animate-fade-up mt-10 flex flex-col items-start gap-3"
+                      style={{ animationDelay: "0.35s" }}
                     >
-                      <span>{ctaLabel}</span>
-                      <span
-                        aria-hidden
-                        className="text-base transition-transform group-hover:rotate-45 sm:text-lg"
+                      <label className="w-full max-w-xs sm:max-w-sm">
+                        <span className="sr-only">
+                          What's on your mind? (optional)
+                        </span>
+                        <input
+                          type="text"
+                          value={question}
+                          onChange={(e) => setQuestion(e.target.value)}
+                          placeholder="What's on your mind? (optional)"
+                          autoComplete="off"
+                          className="w-full rounded-full border border-gold-500/30 bg-night-900/75 px-5 py-3 text-sm text-cream-100 placeholder:text-cream-100/35 transition focus:border-gold-400/70 focus:ring-2 focus:ring-gold-500/25 focus:outline-none"
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        onClick={startReading}
+                        disabled={drawing}
+                        className="group inline-flex cursor-pointer items-center gap-3 rounded-full bg-gradient-to-b from-gold-300 via-gold-400 to-gold-500 px-9 py-4 text-sm font-medium tracking-[0.14em] text-night-950 uppercase shadow-[0_10px_40px_rgba(198,160,85,0.35)] transition hover:shadow-[0_12px_55px_rgba(198,160,85,0.55)] hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 sm:text-base"
                       >
-                        ✦
-                      </span>
-                    </button>
-                    <p className="text-xs text-cream-100/50">
-                      Daily Card is free · Three-card &amp; Pro from $5/month
-                    </p>
-                  </div>
+                        <span>{ctaLabel}</span>
+                        <span
+                          aria-hidden
+                          className="text-base transition-transform group-hover:rotate-45 sm:text-lg"
+                        >
+                          ✦
+                        </span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div
+                      className="animate-fade-up mt-10 flex flex-col items-start gap-3 sm:flex-row sm:items-center"
+                      style={{ animationDelay: "0.35s" }}
+                    >
+                      <a
+                        href="#daily-card"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        <span>See today&rsquo;s free card</span>
+                        <span aria-hidden>✦</span>
+                      </a>
+                      <a
+                        href="#paid-readings"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        <span>Browse paid readings</span>
+                        <span aria-hidden>✦</span>
+                      </a>
+                    </div>
+                  )}
                 </div>
               </section>
 
