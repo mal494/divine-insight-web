@@ -82,6 +82,10 @@ needed. Just do not edit a link's price in the dashboard without updating
 `SKUS`, because the webhook compares the two and refuses to fulfil on a
 mismatch.
 
+`go-live.sh` forwards only `DATABASE_URL` into the Vercel deploy. Set
+`STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `GIFT_FROM_EMAIL`, and
+`PUBLIC_SITE_URL` on the Vercel project. A local `.env` is not copied for those.
+
 ## Testing it
 
 ```sh
@@ -109,13 +113,87 @@ the schema bootstraps itself):
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
 
+## Divine Insight Pro
+
+Pro is a separate $5/month subscription **scaffold**. It is not a key in
+`SKUS`, and `/api/stripe-webhook` does not grant it. The one-time ladder above
+is unchanged.
+
+### What the UI gates
+
+| Surface | What actually gates it |
+| --- | --- |
+| Draw tab, three-card Past / Present / Future | `PremiumGate` only. No order, no webhook. |
+| Extended tab | `PremiumGate`, and then `ExtendedReading`'s own `useEntitlement("extendedReading")` (a `readingBundle` order also unlocks that draw). |
+| Journal tab | `PremiumGate`. The list is the hardcoded `SAMPLE_ENTRIES` in `src/components/Journal.tsx`. |
+| Card of the Day, All Cards, pricing, Single Insight, Gift, tips | Not wrapped in `PremiumGate`. Single, Extended's inner draw, Bundle, and Gift still use the SKU flow. |
+
+The upgrade modal mentions a Celtic Cross and 1-to-5 vector scoring. Those
+screens are not built. The Extended tab is still the five-card spread in
+`src/components/extended-reading.tsx` (Foundation, Current path, Hidden
+influence, Near future, Outcome).
+
+`PremiumGate` blurs its children and sets `pointer-events: none`. It leaves
+them in the DOM and does not ask the server. The hero **draw** button sits
+outside the gate and still calls `startReading`, so a free visitor can produce
+a three-card result that is only hidden behind the blur.
+
+### Where the flag lives
+
+`SubscriptionProvider` (`src/context/SubscriptionContext.tsx`) wraps the app
+from `src/routes/__root.tsx`.
+
+- On load, `verifyPremiumStatus` waits 120ms, then reads
+  `localStorage["di.subscription.isPremium"] === "true"`. During SSR (`window`
+  is missing) the flag is false.
+- `setIsPremium` and `togglePremium` write that key. If `localStorage` throws
+  (private mode), the flag stays in memory for the tab.
+- `PremiumDevToggle` renders only when `import.meta.env.DEV` (bottom-right
+  **Pro: On / Off**). Checkout does not call `setIsPremium`.
+- While `loading` is true, `PremiumGate` still blurs its children and sets
+  `aria-busy`.
+
+A production build omits the toggle. Anyone who sets the localStorage key is
+treated as Pro. This scaffold is a UI prototype, not access control.
+
+### Checkout scaffold
+
+`redirectToProCheckout` in `src/lib/stripe-checkout.ts`:
+
+- Loads Stripe.js with the placeholder publishable key
+  `pk_test_placeholder_divine_insight_pro`.
+- Logs the placeholder price id `price_placeholder_divine_insight_pro_monthly`.
+- Does not create a Checkout Session and does not call
+  `stripe.redirectToCheckout`. It shows an alert that the endpoint is not
+  connected.
+
+The file's own constraint: create the Session on the server before going live.
+Do not create Sessions with the publishable key alone.
+
+To replace the mock, change `verifyPremiumStatus` to a server entitlement read
+and return a session id from a server route. Do not mark Pro paid in the
+browser. The existing webhook only fulfils rows in `SKUS`; a Pro subscription
+needs its own server check before it can unlock anything for real.
+
+### Trying the gate locally
+
+```sh
+bun run dev
+```
+
+Use **Pro: Off** in the corner. The choice persists in this browser under
+`di.subscription.isPremium`. The Upgrade button alerts and leaves the flag
+alone.
+
 ## Still to do
 
 - Readings are composed client-side and posted back, so the server decides
   *access* while the client decides *when a credit is spent*. Worst case a
   visitor under-spends their own credits. Closing it means generating readings
   server-side, which is a much larger refactor.
-- The stored readings have no UI yet beyond the bundle's own section. The
-  journal is `/api/order/<id>?include=readings` waiting for a page.
+- The Journal tab is a Pro-gated preview of sample entries. Stored readings
+  are still only `GET /api/order/<id>?include=readings`.
 - Tips stay honor-based on purpose. A tip unlocks nothing, so there is nothing
   to verify.
+- Pro checkout and Pro entitlement are client-side placeholders. They do not
+  write `orders` and they do not survive a different browser.

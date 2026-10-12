@@ -1,11 +1,13 @@
 # Your site
 
-This is the team's website. It's a [TanStack Start](https://tanstack.com/start)
-app (React + Vite + Tailwind), served on **port 3000**. It starts life as a simple
-"coming soon" placeholder (the headline reads the business name from `site.json` at
-request time), but it's a real full-stack framework — build it out into the real
-site and grow it into a dynamic app without changing hosting or starting a second
-server.
+Divine Insight Web is a [TanStack Start](https://tanstack.com/start) app
+(React + Vite + Tailwind), served on **port 3000**. Product layout and commands
+are in `README.md`. Card-data rules are in `CORE.md`. One-time payments and the
+Pro subscription scaffold are in `PAYMENTS.md`.
+
+The headline and readings are the app in `src/routes/index.tsx`. `site.json`
+still supplies `businessName` where a route reads it. This file is only the
+short guide for adding server behavior on the same port.
 
 ## Layout
 
@@ -31,8 +33,9 @@ in `.run/`.
 
 ## Making it dynamic
 
-The site is static today, but adding backend behavior is one file away — no second
-process, no extra port, all served on the same port 3000:
+API routes already live under `src/routes/api/` (checkout, the Stripe webhook,
+order lookup, reading storage). Adding another behavior is one file on the same
+port 3000 — no second process:
 
 - **Server function** — call server-only code (DB, secrets, fetch) directly from a
   component:

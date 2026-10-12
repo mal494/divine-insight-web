@@ -8,6 +8,10 @@ Card data comes from [Divine Insight Core](https://github.com/mal494/divine-insi
 — this repo never edits card copy directly. See `CORE.md` for the pinned-version
 rules.
 
+Paid one-time readings and the Divine Insight Pro subscription scaffold are
+different systems. See `PAYMENTS.md` before changing a gate, a price, or a
+Stripe call.
+
 ## Prerequisites
 
 - [Bun](https://bun.sh) ≥ 1.1 (`bun --version`)
@@ -40,9 +44,26 @@ bun run dev          # dev server on http://localhost:3000
 > `bun run dev` / `bun run build` instead — the sandbox-only takeover logic in
 > `serve.ts` won't run outside that environment.
 
+## Vercel
+
+`vercel.json` sets the project build command to `bash ./build-vercel.sh`.
+`bun run go-live` runs that script, then `vercel deploy --prebuilt`.
+
+`build-vercel.sh` does three things:
+
+1. `bun install` and `bun run build` (Vite emits `dist/client` and `dist/server`).
+2. Copies `dist/client` to `.vercel/output/static` and deletes `index.html`
+   there, so `/` is rendered by SSR rather than a static shell.
+3. Bundles `vercel-entry.ts` into
+   `.vercel/output/functions/render.func/index.mjs` (Node.js 22.x). Every other
+   path falls through to that function (`config.json` route `/(.*) → /render`).
+
+TanStack Start's server entry dynamic-imports its own chunks. The script
+inlines those into one file so Vercel does not have to trace them.
+
 ## Environment variables
 
-None are required to build or run the dev server. Two matter at deploy time:
+None are required to build or run the dev server. These matter at deploy time:
 
 | Variable | Required by | Purpose |
 |----------|-------------|---------|
@@ -50,6 +71,14 @@ None are required to build or run the dev server. Two matter at deploy time:
 | `DATABASE_URL` | runtime queries via `src/db.ts` | Neon Postgres connection string — resolved lazily, so the site builds & serves without it; only actual queries throw |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `VERCEL_SCOPE` / `VERCEL_TEAM_ID` / `VERCEL_PROJECT_NAME` | optional | Overrides for `go-live.sh` team/project resolution |
+
+Payment and gift-email variables (`STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`,
+`GIFT_FROM_EMAIL`, `PUBLIC_SITE_URL`) are listed in `PAYMENTS.md` and
+`.env.example`. The dev server runs without them. `go-live.sh` forwards only
+`DATABASE_URL` to Vercel; set the others on the Vercel project.
+
+Pro does not read an env var. Its publishable key and price id are the
+placeholder constants in `src/lib/stripe-checkout.ts`.
 
 Create a local `.env` (gitignored) if you need any of these during development:
 
@@ -62,14 +91,17 @@ cp .env.example .env   # if present; otherwise create .env manually
 ```
 src/
   routes/
-    __root.tsx     # HTML shell: <head>, fonts, canonical/og tags, layout
+    __root.tsx     # HTML shell: <head>, fonts, canonical/og tags, SubscriptionProvider
     index.tsx      # the landing page ("/")
-  components/      # card-face, reading-panel, pricing, tip-jar, …
+    api/           # checkout, stripe-webhook, order, reading
+  components/      # card-face, reading-panel, pricing, PremiumGate, Journal, …
+  context/
+    SubscriptionContext.tsx  # client-only Pro flag (localStorage mock)
   data/
     deck.generated.ts   # GENERATED — do not hand-edit (see CORE.md)
     deck.ts             # deck accessors
     artwork.ts          # which card ids have real artwork (all 78)
-  lib/             # analytics, payments, random, synthesis
+  lib/             # analytics, payments, orders, stripe-checkout, random, synthesis
   styles/app.css   # Tailwind entrypoint + base styles
   db.ts            # Neon serverless Postgres helper (server-only)
 scripts/
