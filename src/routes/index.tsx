@@ -166,6 +166,7 @@ function Home() {
   );
   const [view, setView] = useState<View>("draw");
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const showJournalTab = import.meta.env.DEV;
 
   const galleryOpen = view === "gallery";
   const openGallery = useCallback(() => setView("gallery"), []);
@@ -268,14 +269,16 @@ function Home() {
               >
                 Extended
               </button>
-              <button
-                type="button"
-                onClick={() => setView("journal")}
-                aria-current={view === "journal" ? "page" : undefined}
-                className={tabCls(view === "journal")}
-              >
-                Journal
-              </button>
+              {showJournalTab && (
+                <button
+                  type="button"
+                  onClick={() => setView("journal")}
+                  aria-current={view === "journal" ? "page" : undefined}
+                  className={tabCls(view === "journal")}
+                >
+                  Journal
+                </button>
+              )}
               <button
                 type="button"
                 onClick={openGallery}
@@ -301,7 +304,7 @@ function Home() {
              * Pro subscription gates the three-card spread and Journal instead.
              */
             <ExtendedReading />
-          ) : view === "journal" ? (
+          ) : view === "journal" && showJournalTab ? (
             <PremiumGate>
               <Journal />
             </PremiumGate>
@@ -366,7 +369,7 @@ function Home() {
                       </span>
                     </button>
                     <p className="text-xs text-cream-100/50">
-                      Daily Card is free · Three-card &amp; Pro from $5/month
+                      Daily Card is free · Paid readings start at $2.99
                     </p>
                   </div>
                 </div>

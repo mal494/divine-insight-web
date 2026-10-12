@@ -1,9 +1,9 @@
 /**
  * SubscriptionContext — client-side premium status for Divine Insight Pro.
  *
- * Backend verification is mocked for now: `isPremium` can be toggled for local
- * testing. When a real subscription check lands, replace `verifyPremiumStatus`
- * with a server call and keep this context as the single source of truth for UI.
+ * Pro is hidden in production, so premium status is only overridable in local
+ * dev builds (via PremiumDevToggle). In production this context always settles
+ * to `isPremium=false`, regardless of localStorage contents.
  */
 import {
   createContext,
@@ -16,6 +16,7 @@ import {
 } from "react";
 
 const STORAGE_KEY = "di.subscription.isPremium";
+const DEV_PREMIUM_TOGGLE_ENABLED = import.meta.env.DEV;
 
 type SubscriptionContextValue = {
   /** Whether the visitor has an active Divine Insight Pro subscription. */
@@ -38,7 +39,8 @@ const SubscriptionContext = createContext<SubscriptionContextValue | null>(
  */
 async function verifyPremiumStatus(): Promise<boolean> {
   await new Promise((resolve) => setTimeout(resolve, 120));
-  if (typeof window === "undefined") return false;
+  if (!DEV_PREMIUM_TOGGLE_ENABLED || typeof window === "undefined")
+    return false;
   try {
     return window.localStorage.getItem(STORAGE_KEY) === "true";
   } catch {
@@ -64,6 +66,10 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const setIsPremium = useCallback((value: boolean) => {
+    if (!DEV_PREMIUM_TOGGLE_ENABLED) {
+      setIsPremiumState(false);
+      return;
+    }
     setIsPremiumState(value);
     try {
       window.localStorage.setItem(STORAGE_KEY, value ? "true" : "false");
@@ -73,6 +79,7 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const togglePremium = useCallback(() => {
+    if (!DEV_PREMIUM_TOGGLE_ENABLED) return;
     setIsPremiumState((prev) => {
       const next = !prev;
       try {
