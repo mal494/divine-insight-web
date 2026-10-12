@@ -100,7 +100,7 @@ src/
     api/           # checkout, stripe-webhook, order, reading
   components/      # card-face, reading-panel, pricing, PremiumGate, Journal, …
   context/
-    SubscriptionContext.tsx  # client-only Pro flag (localStorage mock)
+    SubscriptionContext.tsx  # Pro flag; production always off, dev localStorage only
   data/
     deck.generated.ts   # GENERATED — do not hand-edit (see CORE.md)
     deck.ts             # deck accessors

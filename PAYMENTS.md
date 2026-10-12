@@ -121,59 +121,47 @@ is unchanged.
 
 ### What the UI gates
 
-| Surface | What actually gates it |
+Pro surfaces are hidden, not blurred. `PremiumGate` returns `null` while
+`loading` is true or `isPremium` is false, so free visitors do not get the
+gated markup at all.
+
+| Surface | What a free visitor sees |
 | --- | --- |
-| Draw tab, three-card Past / Present / Future (`#reading`) | `PremiumGate` only. No order, no webhook. |
-| Extended tab | `useEntitlement("extendedReading")` inside `ExtendedReading`. A `readingBundle` order also unlocks that draw. It is not wrapped in `PremiumGate`, so a paid one-time purchase is not blocked by the Pro flag. |
-| Journal tab | `PremiumGate`. The list is the hardcoded `SAMPLE_ENTRIES` in `src/components/Journal.tsx`. |
-| Card of the Day, All Cards, pricing, Single Insight, Gift, tips | Not wrapped in `PremiumGate`. Single, Bundle, and Gift still use the SKU flow. |
+| Three-card Past / Present / Future (`#reading`) | Hidden. `PremiumGate` does not mount the section. |
+| Journal tab | Hidden. The tab renders only when `isPremium` is true, and the panel is still wrapped in `PremiumGate`. The list is the hardcoded `SAMPLE_ENTRIES` in `src/components/Journal.tsx`. |
+| Hero | Two links: **See today's free card** (`#daily-card`) and **Browse paid readings** (`#paid-readings`). The three-card draw control is not shown. |
+| Card of the Day | Always visible. Its CTA goes to `#paid-readings`. |
+| Extended tab | Not wrapped in `PremiumGate`. `useEntitlement("extendedReading")` still unlocks a paid one-time reading, and a `readingBundle` order unlocks that draw too. |
+| Pricing, Single Insight, Gift, tips, All Cards | Unchanged one-time SKU flow. No Pro upgrade copy. |
 
-The upgrade modal mentions a Celtic Cross and 1-to-5 vector scoring. Those
-screens are not built. The Extended tab is still the five-card spread in
-`src/components/extended-reading.tsx` (Foundation, Current path, Hidden
-influence, Near future, Outcome).
-
-`PremiumGate` blurs its children and sets `pointer-events: none`. It leaves
-them in the DOM and does not ask the server. The hero **draw** button sits
-outside the gate and still calls `startReading`, so a free visitor can produce
-a three-card result that is only hidden behind the blur.
+The Celtic Cross and 1-to-5 vector scoring screens are not built. The Extended
+tab is still the five-card spread in `src/components/extended-reading.tsx`.
 
 ### Where the flag lives
 
 `SubscriptionProvider` (`src/context/SubscriptionContext.tsx`) wraps the app
 from `src/routes/__root.tsx`.
 
-- On load, `verifyPremiumStatus` waits 120ms, then reads
-  `localStorage["di.subscription.isPremium"] === "true"`. During SSR (`window`
-  is missing) the flag is false.
-- `setIsPremium` and `togglePremium` write that key. If `localStorage` throws
-  (private mode), the flag stays in memory for the tab.
-- `PremiumDevToggle` renders only when `import.meta.env.DEV` (bottom-right
-  **Pro: On / Off**). Checkout does not call `setIsPremium`.
-- While `loading` is true, `PremiumGate` still blurs its children and sets
-  `aria-busy`.
+- Production builds never read `localStorage`. `verifyPremiumStatus` returns
+  false, and `setIsPremium` / `togglePremium` leave the flag off.
+- In `import.meta.env.DEV` only, the flag is `localStorage["di.subscription.isPremium"] === "true"`.
+  During SSR (`window` is missing) it is false.
+- `PremiumDevToggle` renders only in dev (bottom-right **Pro: On / Off**).
+  Checkout does not call `setIsPremium`.
 
-A production build omits the toggle. Anyone who sets the localStorage key is
-treated as Pro. This scaffold is a UI prototype, not access control.
+Setting the localStorage key in a production build does nothing. Pro is not
+access control and it is not for sale on the site.
 
 ### Checkout scaffold
 
-`redirectToProCheckout` in `src/lib/stripe-checkout.ts`:
+`src/lib/stripe-checkout.ts` still exports `redirectToProCheckout`, which loads
+Stripe.js with the placeholder key `pk_test_placeholder_divine_insight_pro`,
+logs `price_placeholder_divine_insight_pro_monthly`, and alerts instead of
+creating a Checkout Session. Nothing in the UI calls it. Do not create
+Sessions with the publishable key alone.
 
-- Loads Stripe.js with the placeholder publishable key
-  `pk_test_placeholder_divine_insight_pro`.
-- Logs the placeholder price id `price_placeholder_divine_insight_pro_monthly`.
-- Does not create a Checkout Session and does not call
-  `stripe.redirectToCheckout`. It shows an alert that the endpoint is not
-  connected.
-
-The file's own constraint: create the Session on the server before going live.
-Do not create Sessions with the publishable key alone.
-
-To replace the mock, change `verifyPremiumStatus` to a server entitlement read
-and return a session id from a server route. Do not mark Pro paid in the
-browser. The existing webhook only fulfils rows in `SKUS`; a Pro subscription
-needs its own server check before it can unlock anything for real.
+A real Pro subscription needs its own server check. The existing webhook only
+fulfils rows in `SKUS`.
 
 ### Trying the gate locally
 
@@ -181,9 +169,9 @@ needs its own server check before it can unlock anything for real.
 bun run dev
 ```
 
-Use **Pro: Off** in the corner. The choice persists in this browser under
-`di.subscription.isPremium`. The Upgrade button alerts and leaves the flag
-alone.
+Use **Pro: On** in the corner to preview the three-card section and Journal.
+The choice persists in this browser under `di.subscription.isPremium` for dev
+builds only. A production build has no toggle and no upgrade button.
 
 ## Still to do
 
@@ -195,5 +183,5 @@ alone.
   are still only `GET /api/order/<id>?include=readings`.
 - Tips stay honor-based on purpose. A tip unlocks nothing, so there is nothing
   to verify.
-- Pro checkout and Pro entitlement are client-side placeholders. They do not
-  write `orders` and they do not survive a different browser.
+- Pro is hidden in production and is not sold. The dev toggle is the only way
+  to preview it. It does not write `orders`.
