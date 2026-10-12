@@ -293,10 +293,14 @@ function Home() {
 
         <main id="top" className="mx-auto w-full max-w-6xl flex-1 px-5 sm:px-8">
           {view === "extended" ? (
-            /* Extended five-card spread — Pro-gated (Celtic Cross / advanced) */
-            <PremiumGate>
-              <ExtendedReading />
-            </PremiumGate>
+            /*
+             * Extended stays on the verified one-time SKU / Bundle entitlement
+             * (useEntitlement inside ExtendedReading). Do not wrap it in
+             * PremiumGate — that would block customers who already paid $9.99
+             * (or a Bundle) and would also hide the existing Stripe unlock CTA.
+             * Pro subscription gates the three-card spread and Journal instead.
+             */
+            <ExtendedReading />
           ) : view === "journal" ? (
             <PremiumGate>
               <Journal />
