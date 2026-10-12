@@ -56,6 +56,56 @@ export type Entitlement = {
 };
 
 type OrderView = { status: string; credits: number };
+export type EntitlementOrderSnapshot = {
+  id: string;
+  status: string;
+  credits: number;
+};
+
+export function resolveEntitlementFromOrders(
+  orders: EntitlementOrderSnapshot[],
+): {
+  status: EntitlementStatus;
+  credits: number;
+  activeOrderId: string | null;
+  settled: boolean;
+} {
+  let best: EntitlementOrderSnapshot | null = null;
+  let sawPending = false;
+
+  for (const order of orders) {
+    if (order.status === "paid") {
+      // Prefer an order that still has credits; otherwise remember a spent one
+      // so the UI can say "already drawn" rather than "locked".
+      if (!best || (order.credits > 0 && best.credits === 0)) {
+        best = order;
+      }
+      continue;
+    }
+    if (order.status === "pending") sawPending = true;
+  }
+
+  if (best && best.credits > 0) {
+    return {
+      status: "unlocked",
+      credits: best.credits,
+      activeOrderId: best.id,
+      settled: true,
+    };
+  }
+  if (best) {
+    return { status: "spent", credits: 0, activeOrderId: best.id, settled: true };
+  }
+  if (sawPending) {
+    return {
+      status: "awaiting-payment",
+      credits: 0,
+      activeOrderId: null,
+      settled: false,
+    };
+  }
+  return { status: "locked", credits: 0, activeOrderId: null, settled: false };
+}
 
 export function useEntitlement(
   primary: Sku,
@@ -84,8 +134,7 @@ export function useEntitlement(
    * the picture is final (paid or gone), which is the signal to stop polling.
    */
   const refresh = useCallback(async (): Promise<boolean> => {
-    let best: { id: string; view: OrderView } | null = null;
-    let sawPending = false;
+    const snapshots: EntitlementOrderSnapshot[] = [];
 
     for (const sku of skusRef.current) {
       const id = window.localStorage.getItem(STORAGE_PREFIX + sku);
@@ -104,33 +153,14 @@ export function useEntitlement(
       } catch {
         continue;
       }
-      if (view.status !== "paid") {
-        sawPending = true;
-        continue;
-      }
-      // Prefer an order that still has credits; otherwise remember a spent one
-      // so the UI can say "already drawn" rather than "locked".
-      if (!best || (view.credits > 0 && best.view.credits === 0)) {
-        best = { id, view };
-      }
+      snapshots.push({ id, status: view.status, credits: view.credits });
     }
 
-    if (best && best.view.credits > 0) {
-      activeOrderId.current = best.id;
-      setCredits(best.view.credits);
-      setStatus("unlocked");
-      return true;
-    }
-    if (best) {
-      activeOrderId.current = best.id;
-      setCredits(0);
-      setStatus("spent");
-      return true;
-    }
-    activeOrderId.current = null;
-    setCredits(0);
-    setStatus(sawPending ? "awaiting-payment" : "locked");
-    return false;
+    const next = resolveEntitlementFromOrders(snapshots);
+    activeOrderId.current = next.activeOrderId;
+    setCredits(next.credits);
+    setStatus(next.status);
+    return next.settled;
   }, []);
 
   const beginPolling = useCallback(() => {
