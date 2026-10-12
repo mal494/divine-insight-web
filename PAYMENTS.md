@@ -61,6 +61,10 @@ over an email problem.
 | `GIFT_FROM_EMAIL` | A sender verified in Resend, e.g. `Divine Insight <readings@yourdomain>`. |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
 
+`go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
+`GIFT_FROM_EMAIL` is missing, and injects those values into the deployment with
+`-e` so production deploys cannot silently omit payment/email secrets.
+
 Without `STRIPE_WEBHOOK_SECRET` the webhook refuses every request, which means
 no order ever becomes paid. That is the intended failure direction: a
 misconfigured site sells nothing rather than giving everything away.

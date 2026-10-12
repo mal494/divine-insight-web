@@ -42,14 +42,21 @@ bun run dev          # dev server on http://localhost:3000
 
 ## Environment variables
 
-None are required to build or run the dev server. Two matter at deploy time:
+None are required to build or run the dev server. These matter at deploy time:
 
 | Variable | Required by | Purpose |
 |----------|-------------|---------|
 | `VERCEL_TOKEN` | `bun run go-live` | Vercel deploy token (collected from the owner) |
 | `DATABASE_URL` | runtime queries via `src/db.ts` | Neon Postgres connection string — resolved lazily, so the site builds & serves without it; only actual queries throw |
+| `STRIPE_WEBHOOK_SECRET` | `/api/stripe-webhook` | Stripe signing secret (`whsec_...`). Required for paid orders to flip to `paid` |
+| `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
+| `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `VERCEL_SCOPE` / `VERCEL_TEAM_ID` / `VERCEL_PROJECT_NAME` | optional | Overrides for `go-live.sh` team/project resolution |
+
+`go-live.sh` fails fast when `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
+`GIFT_FROM_EMAIL` is missing, and passes them to Vercel with `-e` so a deploy
+cannot silently go out without payment/gift-email configuration.
 
 Create a local `.env` (gitignored) if you need any of these during development:
 
