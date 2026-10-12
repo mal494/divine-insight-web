@@ -11,15 +11,28 @@ type StoredOrder = {
   sessionId: string | null;
 };
 
+type StoredReading = {
+  id: string;
+  orderId: string;
+  payload: unknown;
+};
+
 type FakeState = {
   orders: Map<string, StoredOrder>;
+  readings: Map<string, StoredReading>;
   appliedEvents: Set<string>;
+  failNextReadingInsert: boolean;
 };
 
 let state: FakeState = freshState();
 
 function freshState(): FakeState {
-  return { orders: new Map(), appliedEvents: new Set() };
+  return {
+    orders: new Map(),
+    readings: new Map(),
+    appliedEvents: new Set(),
+    failNextReadingInsert: false,
+  };
 }
 
 function normalizeSql(strings: TemplateStringsArray): string {
@@ -30,6 +43,11 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
   const sql = normalizeSql(strings);
 
   if (sql.startsWith("create table") || sql.startsWith("create index")) return [];
+
+  if (sql.startsWith("select id from stripe_events where id =")) {
+    const eventId = String(values[0]);
+    return state.appliedEvents.has(eventId) ? [{ id: eventId }] : [];
+  }
 
   if (sql.startsWith("insert into stripe_events")) {
     const eventId = String(values[0]);
@@ -63,8 +81,39 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
       order.status = "paid";
       order.paymentIntent = paymentIntent;
       order.sessionId = sessionId;
+      return [{ id: orderId }];
     }
     return [];
+  }
+
+  if (sql.startsWith("with spent as ( update orders")) {
+    const [orderIdRaw, readingIdRaw, readingOrderIdRaw, payloadRaw] = values;
+    const orderId = String(orderIdRaw);
+    const readingId = String(readingIdRaw);
+    const readingOrderId = String(readingOrderIdRaw);
+    const order = state.orders.get(orderId);
+
+    if (
+      !order ||
+      order.status !== "paid" ||
+      order.credits <= 0 ||
+      order.id !== readingOrderId
+    ) {
+      return [{ reading_id: null, credits_left: null }];
+    }
+
+    if (state.failNextReadingInsert) {
+      state.failNextReadingInsert = false;
+      throw new Error("simulated reading insert failure");
+    }
+
+    order.credits -= 1;
+    state.readings.set(readingId, {
+      id: readingId,
+      orderId: readingOrderId,
+      payload: JSON.parse(String(payloadRaw)),
+    });
+    return [{ reading_id: readingId, credits_left: order.credits }];
   }
 
   throw new Error(`Unexpected query in test double: ${sql}`);
@@ -73,7 +122,7 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
 vi.mock("~/db", () => ({
   sql: () => query,
 }));
-import { markPaid, SKUS } from "../orders";
+import { markPaid, saveReading, SKUS } from "../orders";
 
 function seedOrder(args: {
   id: string;
@@ -140,6 +189,48 @@ describe("markPaid", () => {
     expect(state.orders.get(orderId)?.status).toBe("pending");
   });
 
+  test("does not claim an event id before fulfilment succeeds", async () => {
+    const orderId = "12121212-1212-4212-8212-121212121212";
+    seedOrder({ id: orderId, sku: "singleInsight" });
+
+    const mismatch = await markPaid({
+      eventId: "evt_checkout_completed_retryable",
+      orderId,
+      paymentIntent: "pi_bad",
+      sessionId: "cs_bad",
+      amountCents: SKUS.singleInsight.amountCents + 50,
+    });
+    const retry = await markPaid({
+      eventId: "evt_checkout_completed_retryable",
+      orderId,
+      paymentIntent: "pi_good",
+      sessionId: "cs_good",
+      amountCents: SKUS.singleInsight.amountCents,
+    });
+
+    expect(mismatch).toBe("amount-mismatch");
+    expect(retry).toBe("applied");
+    expect(state.orders.get(orderId)?.status).toBe("paid");
+  });
+
+  test("can still fulfil a pending order even if the event id was claimed earlier", async () => {
+    const orderId = "23232323-2323-4232-8232-232323232323";
+    const eventId = "evt_stale_claim_from_old_bug";
+    seedOrder({ id: orderId, sku: "extendedReading" });
+    state.appliedEvents.add(eventId);
+
+    const result = await markPaid({
+      eventId,
+      orderId,
+      paymentIntent: "pi_stale",
+      sessionId: "cs_stale",
+      amountCents: SKUS.extendedReading.amountCents,
+    });
+
+    expect(result).toBe("duplicate");
+    expect(state.orders.get(orderId)?.status).toBe("paid");
+  });
+
   test("returns unknown-order when webhook references an order id we never issued", async () => {
     const result = await markPaid({
       eventId: "evt_checkout_completed_3",
@@ -150,5 +241,34 @@ describe("markPaid", () => {
     });
 
     expect(result).toBe("unknown-order");
+  });
+});
+
+describe("saveReading", () => {
+  beforeEach(() => {
+    state = freshState();
+  });
+
+  test("spends one credit and stores the reading when the order is paid", async () => {
+    const orderId = "44444444-4444-4444-8444-444444444444";
+    seedOrder({ id: orderId, sku: "readingBundle", status: "paid" });
+
+    const spent = await saveReading(orderId, { summary: "first draw" });
+
+    expect(spent?.creditsLeft).toBe(SKUS.readingBundle.credits - 1);
+    expect(state.orders.get(orderId)?.credits).toBe(SKUS.readingBundle.credits - 1);
+    expect(state.readings.size).toBe(1);
+  });
+
+  test("keeps credits unchanged when reading insert fails", async () => {
+    const orderId = "55555555-5555-4555-8555-555555555555";
+    seedOrder({ id: orderId, sku: "extendedReading", status: "paid" });
+    state.failNextReadingInsert = true;
+
+    await expect(saveReading(orderId, { summary: "should rollback" })).rejects.toThrow(
+      "simulated reading insert failure",
+    );
+    expect(state.orders.get(orderId)?.credits).toBe(SKUS.extendedReading.credits);
+    expect(state.readings.size).toBe(0);
   });
 });

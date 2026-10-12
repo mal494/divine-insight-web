@@ -192,6 +192,9 @@ export function useEntitlement(
   const startCheckout = useCallback(
     async (opts?: CheckoutOptions) => {
       const sku = opts?.sku ?? primary;
+      // Open synchronously inside the click gesture; we navigate it once the
+      // checkout session URL comes back from the server.
+      const checkoutTab = window.open("", "_blank", "noopener,noreferrer");
       setBusy(true);
       try {
         const res = await fetch("/api/checkout", {
@@ -205,6 +208,7 @@ export function useEntitlement(
           }),
         });
         if (!res.ok) {
+          checkoutTab?.close();
           setStatus("unavailable");
           return;
         }
@@ -215,11 +219,16 @@ export function useEntitlement(
         window.localStorage.setItem(STORAGE_PREFIX + sku, orderId);
         if (!skusRef.current.includes(sku)) skusRef.current.push(sku);
         setStatus("awaiting-payment");
-        // Open before polling starts so the click stays inside the user
-        // gesture and the popup blocker leaves it alone.
-        window.open(url, "_blank", "noopener,noreferrer");
+        if (checkoutTab) {
+          checkoutTab.location.href = url;
+        } else {
+          // Fallback when the browser blocks popups entirely: send the current
+          // tab to checkout so the buyer can still complete payment.
+          window.location.assign(url);
+        }
         beginPolling();
       } catch {
+        checkoutTab?.close();
         setStatus("unavailable");
       } finally {
         setBusy(false);

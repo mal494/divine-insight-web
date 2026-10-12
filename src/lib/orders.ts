@@ -139,8 +139,8 @@ export async function getOrder(id: string): Promise<Order | null> {
 /**
  * Mark an order paid. Called only from the verified webhook.
  *
- * Idempotent on two levels: the event id is claimed first (so a Stripe retry
- * returns early), and the update itself only fires `where status = 'pending'`.
+ * Idempotent on two levels: the paid write only fires `where status =
+ * 'pending'`, and applied event ids are remembered so retries become no-ops.
  */
 export async function markPaid(args: {
   eventId: string;
@@ -152,12 +152,9 @@ export async function markPaid(args: {
   await ensureSchema();
   const db = sql();
 
-  // Claim the event. If it is already there, Stripe is retrying and we are done.
-  const claimed = await db`
-    insert into stripe_events (id) values (${args.eventId})
-    on conflict (id) do nothing
-    returning id`;
-  if (claimed.length === 0) return "duplicate";
+  const duplicate = await db`
+    select id from stripe_events where id = ${args.eventId} limit 1`;
+  const hasSeenEvent = duplicate.length > 0;
 
   const order = await getOrder(args.orderId);
   if (!order) return "unknown-order";
@@ -170,14 +167,34 @@ export async function markPaid(args: {
     return "amount-mismatch";
   }
 
-  await db`
-    update orders
-       set status = 'paid',
-           paid_at = now(),
-           stripe_payment_intent = ${args.paymentIntent},
-           stripe_session_id = ${args.sessionId}
-     where id = ${args.orderId}
-       and status = 'pending'`;
+  if (order.status === "pending") {
+    const updated = await db`
+      update orders
+         set status = 'paid',
+             paid_at = now(),
+             stripe_payment_intent = ${args.paymentIntent},
+             stripe_session_id = ${args.sessionId}
+       where id = ${args.orderId}
+         and status = 'pending'
+      returning id`;
+
+    if (updated.length === 0) {
+      const latest = await getOrder(args.orderId);
+      if (!latest || latest.status !== "paid") return "unknown-order";
+    }
+  } else if (order.status !== "paid") {
+    return "unknown-order";
+  }
+
+  // Claim only after we know the order is paid (now or already). This keeps
+  // retries viable when we reject a webhook before fulfilment applies.
+  if (hasSeenEvent) return "duplicate";
+
+  const claimed = await db`
+    insert into stripe_events (id) values (${args.eventId})
+    on conflict (id) do nothing
+    returning id`;
+  if (claimed.length === 0) return "duplicate";
   return "applied";
 }
 
@@ -186,7 +203,8 @@ export async function markPaid(args: {
  *
  * Returns null when the order is unpaid or out of credits, so the caller can
  * answer 402 without a second lookup. The decrement and the insert run as one
- * conditional update so two tabs cannot spend the same last credit twice.
+ * SQL statement so they succeed or fail together, and two tabs cannot spend
+ * the same last credit twice.
  */
 export async function saveReading(
   orderId: string,
@@ -196,21 +214,31 @@ export async function saveReading(
   await ensureSchema();
   const db = sql();
 
-  const spent = await db`
-    update orders
-       set credits = credits - 1
-     where id = ${orderId}
-       and status = 'paid'
-       and credits > 0
-    returning credits`;
-  if (spent.length === 0) return null;
-
   const readingId = crypto.randomUUID();
-  await db`
-    insert into readings (id, order_id, payload)
-    values (${readingId}, ${orderId}, ${JSON.stringify(payload)}::jsonb)`;
+  const result = await db`
+    with spent as (
+      update orders
+         set credits = credits - 1
+       where id = ${orderId}
+         and status = 'paid'
+         and credits > 0
+      returning credits
+    ),
+    saved as (
+      insert into readings (id, order_id, payload)
+      select ${readingId}, ${orderId}, ${JSON.stringify(payload)}::jsonb
+        from spent
+      returning id
+    )
+    select
+      (select id from saved) as reading_id,
+      (select credits from spent) as credits_left`;
 
-  return { readingId, creditsLeft: Number((spent[0] as { credits: number }).credits) };
+  const row = result[0] as
+    | { reading_id: string | null; credits_left: number | null }
+    | undefined;
+  if (!row?.reading_id || row.credits_left === null) return null;
+  return { readingId: row.reading_id, creditsLeft: Number(row.credits_left) };
 }
 
 /** Every reading bought on this order, newest first. This is the journal view. */

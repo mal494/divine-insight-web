@@ -1,14 +1,15 @@
 /**
  * POST /api/stripe-webhook — the ONLY place an order becomes paid.
  *
- * Stripe posts here when a checkout completes. We verify the signature against
- * STRIPE_WEBHOOK_SECRET, pull `client_reference_id` (the order id we appended
- * to the payment link), check the amount against our own price table, and flip
- * the order to paid. Nothing else in the codebase may write `status = 'paid'`.
+ * Stripe posts here when a checkout completes (or later settles for delayed
+ * methods). We verify the signature against STRIPE_WEBHOOK_SECRET, pull
+ * `client_reference_id` (the order id we appended to the payment link), check
+ * the amount against our own price table, and flip the order to paid. Nothing
+ * else in the codebase may write `status = 'paid'`.
  *
  * Point a Stripe endpoint at https://<site>/api/stripe-webhook subscribed to
- * `checkout.session.completed`, and put its signing secret in
- * STRIPE_WEBHOOK_SECRET. See PAYMENTS.md.
+ * `checkout.session.completed` and `checkout.session.async_payment_succeeded`,
+ * and put its signing secret in STRIPE_WEBHOOK_SECRET. See PAYMENTS.md.
  *
  * Always answer 200 once the signature is good, even when we decide not to
  * fulfil — a non-2xx makes Stripe retry for days over something a retry will
@@ -50,7 +51,10 @@ export const Route = createFileRoute("/api/stripe-webhook")({
           return new Response("invalid json", { status: 400 });
         }
 
-        if (event.type !== "checkout.session.completed") {
+        if (
+          event.type !== "checkout.session.completed" &&
+          event.type !== "checkout.session.async_payment_succeeded"
+        ) {
           return new Response("ignored", { status: 200 });
         }
 

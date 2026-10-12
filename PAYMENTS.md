@@ -21,7 +21,8 @@ scrolled past the CTA.
 2. `/api/checkout` opens a `pending` order, looks the price up in its own table
    (`SKUS` in `src/lib/orders.ts`), and returns the Stripe payment link with
    `?client_reference_id=<order id>` appended.
-3. Visitor pays. Stripe POSTs `checkout.session.completed` to
+3. Visitor pays. Stripe POSTs either `checkout.session.completed` (most
+   methods) or `checkout.session.async_payment_succeeded` (delayed methods) to
    `/api/stripe-webhook` with that `client_reference_id`.
 4. The webhook verifies the signature, checks `amount_total` against the SKU's
    price, and flips the order to `paid`.
@@ -76,7 +77,9 @@ Set both before selling gifts.
 **A webhook endpoint in Stripe**
 
 - URL: `https://<your site>/api/stripe-webhook`
-- Event: `checkout.session.completed` (that one event is enough)
+- Events:
+  - `checkout.session.completed`
+  - `checkout.session.async_payment_succeeded`
 
 **Payment links**
 
@@ -91,6 +94,7 @@ mismatch.
 ```sh
 stripe listen --forward-to localhost:3000/api/stripe-webhook
 stripe trigger checkout.session.completed
+stripe trigger checkout.session.async_payment_succeeded
 ```
 
 `stripe listen` prints its own `whsec_...` - use that one locally.
