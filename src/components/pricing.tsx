@@ -151,9 +151,8 @@ export function Pricing() {
           Go deeper when you&rsquo;re ready
         </h2>
         <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-          The free three-card reading above is always here for you. When you
-          want a sharper focus or a longer look, the same deck draws for you —
-          at your pace, on your terms.
+          The same deck draws for focused one-card insights, longer five-card
+          readings, and gifts you can send when the timing feels right.
         </p>
       </div>
 
