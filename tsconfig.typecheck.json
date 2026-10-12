@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "files": ["src/router.d.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.d.ts", "vite.config.ts"],
+  "exclude": ["src/routes/api/**/*.ts"]
+}
