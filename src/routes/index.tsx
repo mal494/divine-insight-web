@@ -344,7 +344,7 @@ function Home() {
                     arcana and all four suits of everyday life. Return whenever
                     you want a moment of reflection.
                   </p>
-                  {isPremium && (
+                  {isPremium ? (
                     <div
                       className="animate-fade-up mt-10 flex flex-col items-start gap-3"
                       style={{ animationDelay: "0.35s" }}
@@ -376,6 +376,26 @@ function Home() {
                           ✦
                         </span>
                       </button>
+                    </div>
+                  ) : (
+                    <div
+                      className="animate-fade-up mt-10 flex flex-col items-start gap-3 sm:flex-row sm:items-center"
+                      style={{ animationDelay: "0.35s" }}
+                    >
+                      <a
+                        href="#daily-card"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        <span>See today&rsquo;s free card</span>
+                        <span aria-hidden>✦</span>
+                      </a>
+                      <a
+                        href="#paid-readings"
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        <span>Browse paid readings</span>
+                        <span aria-hidden>✦</span>
+                      </a>
                     </div>
                   )}
                 </div>

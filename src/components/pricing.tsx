@@ -139,6 +139,7 @@ export function Pricing() {
 
   return (
     <section
+      id="paid-readings"
       aria-label="Choose your reading"
       className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
     >
@@ -151,8 +152,8 @@ export function Pricing() {
           Go deeper when you&rsquo;re ready
         </h2>
         <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-          The same deck draws for focused one-card insights, longer five-card
-          readings, and gifts you can send when the timing feels right.
+          Choose the format that fits the moment: focused one-card insights,
+          extended five-card readings, bundles, or a gift reading.
         </p>
       </div>
 
