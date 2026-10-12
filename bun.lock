@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "team-site-template",
+      "name": "divine-insight-web",
       "dependencies": {
         "@neondatabase/serverless": "^1.1.0",
         "@stripe/stripe-js": "^10.0.0",
