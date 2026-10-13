@@ -27,7 +27,7 @@ function requestFor(args?: {
     "x-forwarded-for": args?.ip ?? "203.0.113.10",
   };
 
-  const token = args?.token ?? BASE_ENV.GEMINI_PROXY_APP_TOKEN;
+  const token = args && "token" in args ? args.token : BASE_ENV.GEMINI_PROXY_APP_TOKEN;
   if (token !== null) {
     headers[getGeminiProxyAuthHeaderName()] = token;
   }
