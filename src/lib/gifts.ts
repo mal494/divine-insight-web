@@ -36,6 +36,25 @@ async function ensureGiftSchema(): Promise<void> {
       claimed_at  timestamptz,
       created_at  timestamptz not null default now()
     )`;
+  // Migration: old builds could create more than one token per order under
+  // races. Keep one row per order before adding the unique index.
+  await sql()`
+    with ranked as (
+      select
+        token,
+        row_number() over (
+          partition by order_id
+          order by claimed desc, claimed_at desc nulls last, created_at asc, token asc
+        ) as rn
+      from gift_claims
+    )
+    delete from gift_claims g
+     using ranked r
+     where g.token = r.token
+       and r.rn > 1`;
+  await sql()`
+    create unique index if not exists gift_claims_order_id_uidx
+      on gift_claims (order_id)`;
 }
 
 /** Read the gift fields captured at checkout. Null when it is not a gift order. */
@@ -72,14 +91,19 @@ export async function createGiftClaim(orderId: string): Promise<string> {
   await ensureGiftSchema();
   const db = sql();
 
-  const existing = await db`
-    select token from gift_claims where order_id = ${orderId} limit 1`;
-  if (existing.length > 0) return (existing[0] as { token: string }).token;
-
   const token = randomToken();
-  await db`
-    insert into gift_claims (token, order_id) values (${token}, ${orderId})`;
-  return token;
+  const rows = await db`
+    with inserted as (
+      insert into gift_claims (token, order_id)
+      values (${token}, ${orderId})
+      on conflict (order_id) do nothing
+      returning token
+    )
+    select token from inserted
+    union all
+    select token from gift_claims where order_id = ${orderId}
+    limit 1`;
+  return (rows[0] as { token: string }).token;
 }
 
 /** What the claim page may show before the recipient turns their card. */
