@@ -62,6 +62,45 @@ export type EntitlementOrderSnapshot = {
   credits: number;
 };
 
+export type CheckoutTabHandle = {
+  location: { href: string };
+  close: () => void;
+  opener: unknown;
+};
+
+export function openCheckoutTab(
+  open: (url?: string, target?: string, features?: string) => CheckoutTabHandle | null,
+): { checkoutTab: CheckoutTabHandle | null; popupBlocked: boolean } {
+  const checkoutTab = open("", "_blank");
+  if (!checkoutTab) return { checkoutTab: null, popupBlocked: true };
+  // We need a live handle to navigate after the checkout session is created.
+  // Drop reverse-tabnabbing access manually once we have that handle.
+  checkoutTab.opener = null;
+  return { checkoutTab, popupBlocked: false };
+}
+
+export function navigateCheckout({
+  checkoutTab,
+  popupBlocked,
+  url,
+  assignCurrentTab,
+}: {
+  checkoutTab: CheckoutTabHandle | null;
+  popupBlocked: boolean;
+  url: string;
+  assignCurrentTab: (url: string) => void;
+}): "new-tab" | "same-tab" | "none" {
+  if (checkoutTab) {
+    checkoutTab.location.href = url;
+    return "new-tab";
+  }
+  if (popupBlocked) {
+    assignCurrentTab(url);
+    return "same-tab";
+  }
+  return "none";
+}
+
 export function resolveEntitlementFromOrders(
   orders: EntitlementOrderSnapshot[],
 ): {
@@ -194,7 +233,7 @@ export function useEntitlement(
       const sku = opts?.sku ?? primary;
       // Open synchronously inside the click gesture; we navigate it once the
       // checkout session URL comes back from the server.
-      const checkoutTab = window.open("", "_blank", "noopener,noreferrer");
+      const { checkoutTab, popupBlocked } = openCheckoutTab(window.open.bind(window));
       setBusy(true);
       try {
         const res = await fetch("/api/checkout", {
@@ -219,13 +258,13 @@ export function useEntitlement(
         window.localStorage.setItem(STORAGE_PREFIX + sku, orderId);
         if (!skusRef.current.includes(sku)) skusRef.current.push(sku);
         setStatus("awaiting-payment");
-        if (checkoutTab) {
-          checkoutTab.location.href = url;
-        } else {
-          // Fallback when the browser blocks popups entirely: send the current
-          // tab to checkout so the buyer can still complete payment.
-          window.location.assign(url);
-        }
+        // Fallback only when a popup was actually blocked.
+        navigateCheckout({
+          checkoutTab,
+          popupBlocked,
+          url,
+          assignCurrentTab: window.location.assign.bind(window.location),
+        });
         beginPolling();
       } catch {
         checkoutTab?.close();
