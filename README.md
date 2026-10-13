@@ -73,6 +73,15 @@ None are required to build or run the dev server. These matter at deploy time:
 | `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
 | `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
+| `GEMINI_API_KEY` | `/api/gemini/v1beta/models/{model}:{operation}` | Server-only Gemini API key used by the proxy |
+| `GEMINI_PROXY_APP_TOKEN` | Gemini proxy auth gate | Shared app token expected in the `x-divine-app-token` request header |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | Gemini proxy durable limiter | Shared Redis limiter backend for Vercel/serverless instances |
+| `GEMINI_ALLOWED_OPERATIONS` | Gemini proxy allow-list | Comma-separated operation allow-list (`generateContent` by default) |
+| `GEMINI_ALLOWED_MODELS` | Gemini proxy allow-list | Optional comma-separated model allow-list (empty = any model) |
+| `GEMINI_PROXY_MAX_REQUEST_BYTES` | Gemini proxy payload guard | Max JSON payload bytes (default `65536`) |
+| `GEMINI_PROXY_RATE_LIMIT_MAX` | Gemini proxy limiter | Max requests per window (default `20`) |
+| `GEMINI_PROXY_RATE_LIMIT_WINDOW_MS` | Gemini proxy limiter | Window size in ms (default `60000`) |
+| `GEMINI_PROXY_RATE_LIMIT_PREFIX` | Gemini proxy limiter | Optional Redis key namespace (`gemini-proxy:v1` default) |
 | `VERCEL_SCOPE` / `VERCEL_TEAM_ID` / `VERCEL_PROJECT_NAME` | optional | Overrides for `go-live.sh` team/project resolution |
 
 `go-live.sh` fails fast when `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
@@ -89,6 +98,43 @@ Create a local `.env` (gitignored) if you need any of these during development:
 ```bash
 cp .env.example .env   # if present; otherwise create .env manually
 ```
+
+## Gemini proxy contract (Android)
+
+Endpoint:
+
+- `POST /api/gemini/v1beta/models/{model}:{operation}`
+- Currently allowed operation defaults to `generateContent`
+
+Required request headers:
+
+- `content-type: application/json`
+- `x-divine-app-token: <GEMINI_PROXY_APP_TOKEN>`
+
+Behavior:
+
+- Proxy forwards the JSON body to Gemini using server-side `GEMINI_API_KEY`
+- Requests are rate limited per `token + client IP`
+- In production, a durable Redis limiter is required (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`); the endpoint fails closed when missing
+- In local dev/test (`NODE_ENV != production`), it safely falls back to an in-memory limiter
+
+Error contract:
+
+- `401 {"error":"unauthorized"}`: missing or wrong `x-divine-app-token`
+- `429 {"error":"rate_limited","retryAfterSeconds":<n>}` (+ `retry-after` header): over limit
+- `503 {"error":"gemini_proxy_not_configured"}`: missing `GEMINI_API_KEY`
+- `503 {"error":"gemini_proxy_auth_not_configured"}`: missing `GEMINI_PROXY_APP_TOKEN`
+- `503 {"error":"gemini_proxy_rate_limit_not_configured"}`: production limiter backend missing/unavailable
+- `403 {"error":"operation_not_allowed"}` / `{"error":"model_not_allowed"}`: blocked by allow-list
+- `415 {"error":"unsupported_media_type"}`: non-JSON body
+- `413 {"error":"payload_too_large"}`: payload exceeds configured max size
+- `400 {"error":"invalid_model_or_operation"}` / `{"error":"invalid_json"}`: invalid route/body input
+
+### Security tradeoffs and upgrade path
+
+`x-divine-app-token` is the most practical immediate control for Android integration and server-side fail-closed behavior, but a shared secret embedded in an app can be extracted by a determined attacker. That is why the proxy also enforces shared, durable rate limits and strict operation/model allow-lists.
+
+Planned hardening path: add an attestation layer (Play Integrity) and/or per-request signatures (device or app-instance key) so possession of a static token alone is insufficient.
 
 ## Project layout
 
