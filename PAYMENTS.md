@@ -61,6 +61,10 @@ over an email problem.
 | `GIFT_FROM_EMAIL` | A sender verified in Resend, e.g. `Divine Insight <readings@yourdomain>`. |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
 
+`go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
+`GIFT_FROM_EMAIL` is missing, and injects those values into the deployment with
+`-e` so production deploys cannot silently omit payment/email secrets.
+
 Without `STRIPE_WEBHOOK_SECRET` the webhook refuses every request, which means
 no order ever becomes paid. That is the intended failure direction: a
 misconfigured site sells nothing rather than giving everything away.
@@ -109,13 +113,75 @@ the schema bootstraps itself):
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
 
+## Divine Insight Pro
+
+Pro is a separate $5/month subscription **scaffold**. It is not a key in
+`SKUS`, and `/api/stripe-webhook` does not grant it. The one-time ladder above
+is unchanged.
+
+### What the UI gates
+
+Pro surfaces are hidden, not blurred. `PremiumGate` returns `null` while
+`loading` is true or `isPremium` is false, so free visitors do not get the
+gated markup at all.
+
+| Surface | What a free visitor sees |
+| --- | --- |
+| Three-card Past / Present / Future (`#reading`) | Hidden. `PremiumGate` does not mount the section. |
+| Journal tab | Hidden. The tab renders only when `isPremium` is true, and the panel is still wrapped in `PremiumGate`. The list is the hardcoded `SAMPLE_ENTRIES` in `src/components/Journal.tsx`. |
+| Hero | Two links: **See today's free card** (`#daily-card`) and **Browse paid readings** (`#paid-readings`). The three-card draw control is not shown. |
+| Card of the Day | Always visible. Its CTA goes to `#paid-readings`. |
+| Extended tab | Not wrapped in `PremiumGate`. `useEntitlement("extendedReading")` still unlocks a paid one-time reading, and a `readingBundle` order unlocks that draw too. |
+| Pricing, Single Insight, Gift, tips, All Cards | Unchanged one-time SKU flow. No Pro upgrade copy. |
+
+The Celtic Cross and 1-to-5 vector scoring screens are not built. The Extended
+tab is still the five-card spread in `src/components/extended-reading.tsx`.
+
+### Where the flag lives
+
+`SubscriptionProvider` (`src/context/SubscriptionContext.tsx`) wraps the app
+from `src/routes/__root.tsx`.
+
+- Production builds never read `localStorage`. `verifyPremiumStatus` returns
+  false, and `setIsPremium` / `togglePremium` leave the flag off.
+- In `import.meta.env.DEV` only, the flag is `localStorage["di.subscription.isPremium"] === "true"`.
+  During SSR (`window` is missing) it is false.
+- `PremiumDevToggle` renders only in dev (bottom-right **Pro: On / Off**).
+  Checkout does not call `setIsPremium`.
+
+Setting the localStorage key in a production build does nothing. Pro is not
+access control and it is not for sale on the site.
+
+### Checkout scaffold
+
+`src/lib/stripe-checkout.ts` still exports `redirectToProCheckout`, which loads
+Stripe.js with the placeholder key `pk_test_placeholder_divine_insight_pro`,
+logs `price_placeholder_divine_insight_pro_monthly`, and alerts instead of
+creating a Checkout Session. Nothing in the UI calls it. Do not create
+Sessions with the publishable key alone.
+
+A real Pro subscription needs its own server check. The existing webhook only
+fulfils rows in `SKUS`.
+
+### Trying the gate locally
+
+```sh
+bun run dev
+```
+
+Use **Pro: On** in the corner to preview the three-card section and Journal.
+The choice persists in this browser under `di.subscription.isPremium` for dev
+builds only. A production build has no toggle and no upgrade button.
+
 ## Still to do
 
 - Readings are composed client-side and posted back, so the server decides
   *access* while the client decides *when a credit is spent*. Worst case a
   visitor under-spends their own credits. Closing it means generating readings
   server-side, which is a much larger refactor.
-- The stored readings have no UI yet beyond the bundle's own section. The
-  journal is `/api/order/<id>?include=readings` waiting for a page.
+- The Journal tab is a Pro-gated preview of sample entries. Stored readings
+  are still only `GET /api/order/<id>?include=readings`.
 - Tips stay honor-based on purpose. A tip unlocks nothing, so there is nothing
   to verify.
+- Pro is hidden in production and is not sold. The dev toggle is the only way
+  to preview it. It does not write `orders`.
