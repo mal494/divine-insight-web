@@ -7,6 +7,7 @@ type StoredOrder = {
   status: "pending" | "paid" | "void";
   credits: number;
   amountCents: number;
+  amountCurrency: string;
   paymentIntent: string | null;
   sessionId: string | null;
 };
@@ -42,7 +43,13 @@ function normalizeSql(strings: TemplateStringsArray): string {
 async function query(strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> {
   const sql = normalizeSql(strings);
 
-  if (sql.startsWith("create table") || sql.startsWith("create index")) return [];
+  if (
+    sql.startsWith("create table") ||
+    sql.startsWith("create index") ||
+    sql.startsWith("alter table")
+  ) {
+    return [];
+  }
 
   if (sql.startsWith("select id from stripe_events where id =")) {
     const eventId = String(values[0]);
@@ -56,7 +63,11 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     return [{ id: eventId }];
   }
 
-  if (sql.startsWith("select id, sku, status, credits from orders where id =")) {
+  if (
+    sql.startsWith(
+      "select id, sku, status, credits, amount_cents, amount_currency from orders where id =",
+    )
+  ) {
     const id = String(values[0]);
     const order = state.orders.get(id);
     if (!order) return [];
@@ -66,6 +77,8 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
         sku: order.sku,
         status: order.status,
         credits: order.credits,
+        amount_cents: order.amountCents,
+        amount_currency: order.amountCurrency,
       },
     ];
   }
@@ -136,6 +149,7 @@ function seedOrder(args: {
     status: args.status ?? "pending",
     credits: spec.credits,
     amountCents: spec.amountCents,
+    amountCurrency: spec.currency,
     paymentIntent: null,
     sessionId: null,
   });
@@ -156,6 +170,7 @@ describe("markPaid", () => {
       paymentIntent: "pi_1",
       sessionId: "cs_1",
       amountCents: SKUS.extendedReading.amountCents,
+      currency: SKUS.extendedReading.currency,
     });
     const second = await markPaid({
       eventId: "evt_checkout_completed_1",
@@ -163,6 +178,7 @@ describe("markPaid", () => {
       paymentIntent: "pi_2",
       sessionId: "cs_2",
       amountCents: SKUS.extendedReading.amountCents,
+      currency: SKUS.extendedReading.currency,
     });
 
     expect(first).toBe("applied");
@@ -173,7 +189,7 @@ describe("markPaid", () => {
     expect(updated?.sessionId).toBe("cs_1");
   });
 
-  test("rejects fulfilment when charged amount disagrees with server-side SKU price", async () => {
+  test("rejects fulfilment when charged amount disagrees with the order's captured price", async () => {
     const orderId = "22222222-2222-4222-8222-222222222222";
     seedOrder({ id: orderId, sku: "singleInsight" });
 
@@ -183,10 +199,47 @@ describe("markPaid", () => {
       paymentIntent: "pi_2",
       sessionId: "cs_2",
       amountCents: SKUS.singleInsight.amountCents + 1,
+      currency: SKUS.singleInsight.currency,
     });
 
     expect(result).toBe("amount-mismatch");
     expect(state.orders.get(orderId)?.status).toBe("pending");
+  });
+
+  test("rejects fulfilment when charged currency disagrees with the order's captured currency", async () => {
+    const orderId = "27272727-2727-4272-8272-272727272727";
+    seedOrder({ id: orderId, sku: "singleInsight" });
+
+    const result = await markPaid({
+      eventId: "evt_checkout_completed_currency",
+      orderId,
+      paymentIntent: "pi_cur",
+      sessionId: "cs_cur",
+      amountCents: SKUS.singleInsight.amountCents,
+      currency: "eur",
+    });
+
+    expect(result).toBe("currency-mismatch");
+    expect(state.orders.get(orderId)?.status).toBe("pending");
+  });
+
+  test("uses the amount captured on the order row, not the current SKU table value", async () => {
+    const orderId = "28282828-2828-4282-8282-282828282828";
+    seedOrder({ id: orderId, sku: "singleInsight" });
+    const order = state.orders.get(orderId);
+    if (order) order.amountCents = 350;
+
+    const result = await markPaid({
+      eventId: "evt_checkout_completed_order_amount",
+      orderId,
+      paymentIntent: "pi_order_amount",
+      sessionId: "cs_order_amount",
+      amountCents: 350,
+      currency: SKUS.singleInsight.currency,
+    });
+
+    expect(result).toBe("applied");
+    expect(state.orders.get(orderId)?.status).toBe("paid");
   });
 
   test("does not claim an event id before fulfilment succeeds", async () => {
@@ -199,6 +252,7 @@ describe("markPaid", () => {
       paymentIntent: "pi_bad",
       sessionId: "cs_bad",
       amountCents: SKUS.singleInsight.amountCents + 50,
+      currency: SKUS.singleInsight.currency,
     });
     const retry = await markPaid({
       eventId: "evt_checkout_completed_retryable",
@@ -206,6 +260,7 @@ describe("markPaid", () => {
       paymentIntent: "pi_good",
       sessionId: "cs_good",
       amountCents: SKUS.singleInsight.amountCents,
+      currency: SKUS.singleInsight.currency,
     });
 
     expect(mismatch).toBe("amount-mismatch");
@@ -225,10 +280,27 @@ describe("markPaid", () => {
       paymentIntent: "pi_stale",
       sessionId: "cs_stale",
       amountCents: SKUS.extendedReading.amountCents,
+      currency: SKUS.extendedReading.currency,
     });
 
-    expect(result).toBe("duplicate");
+    expect(result).toBe("applied");
     expect(state.orders.get(orderId)?.status).toBe("paid");
+  });
+
+  test("returns already-paid for a new event on an order that is already fulfilled", async () => {
+    const orderId = "29292929-2929-4292-8292-292929292929";
+    seedOrder({ id: orderId, sku: "extendedReading", status: "paid" });
+
+    const result = await markPaid({
+      eventId: "evt_checkout_completed_late",
+      orderId,
+      paymentIntent: "pi_late",
+      sessionId: "cs_late",
+      amountCents: SKUS.extendedReading.amountCents,
+      currency: SKUS.extendedReading.currency,
+    });
+
+    expect(result).toBe("already-paid");
   });
 
   test("returns unknown-order when webhook references an order id we never issued", async () => {
@@ -238,6 +310,7 @@ describe("markPaid", () => {
       paymentIntent: "pi_3",
       sessionId: "cs_3",
       amountCents: 999,
+      currency: "usd",
     });
 
     expect(result).toBe("unknown-order");

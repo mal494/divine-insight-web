@@ -26,6 +26,8 @@ export type Sku =
 type SkuSpec = {
   /** Amount in cents, as configured on the Stripe payment link. Server-side truth. */
   amountCents: number;
+  /** ISO currency code (lowercase), as configured on the Stripe payment link. */
+  currency: string;
   /** How many readings this SKU entitles. The bundle is the only multi-credit SKU. */
   credits: number;
   /** Which draw the credit unlocks — the client uses this to pick the view. */
@@ -39,10 +41,10 @@ type SkuSpec = {
  * webhook asserts the two agree and refuses to fulfil an order if they drift.
  */
 export const SKUS: Record<Sku, SkuSpec> = {
-  singleInsight: { amountCents: 299, credits: 1, kind: "single" },
-  extendedReading: { amountCents: 999, credits: 1, kind: "extended" },
-  readingBundle: { amountCents: 1999, credits: 3, kind: "extended" },
-  giftReading: { amountCents: 500, credits: 1, kind: "gift" },
+  singleInsight: { amountCents: 299, currency: "usd", credits: 1, kind: "single" },
+  extendedReading: { amountCents: 999, currency: "usd", credits: 1, kind: "extended" },
+  readingBundle: { amountCents: 1999, currency: "usd", credits: 3, kind: "extended" },
+  giftReading: { amountCents: 500, currency: "usd", credits: 1, kind: "gift" },
 };
 
 export function isSku(value: unknown): value is Sku {
@@ -56,6 +58,8 @@ export type Order = {
   sku: Sku;
   status: OrderStatus;
   credits: number;
+  amountCents: number;
+  amountCurrency: string;
   kind: SkuSpec["kind"];
 };
 
@@ -73,6 +77,7 @@ export async function ensureSchema(): Promise<void> {
       status                 text not null default 'pending',
       credits                integer not null default 0,
       amount_cents           integer not null,
+      amount_currency        text not null default 'usd',
       stripe_session_id      text,
       stripe_payment_intent  text,
       recipient_email        text,
@@ -81,6 +86,9 @@ export async function ensureSchema(): Promise<void> {
       created_at             timestamptz not null default now(),
       paid_at                timestamptz
     )`;
+  await db`
+    alter table orders
+      add column if not exists amount_currency text not null default 'usd'`;
   await db`
     create table if not exists readings (
       id          uuid primary key,
@@ -109,9 +117,11 @@ export async function createOrder(
   const spec = SKUS[sku];
   const id = crypto.randomUUID();
   await sql()`
-    insert into orders (id, sku, status, credits, amount_cents, recipient_email, sender_name, note)
+    insert into orders (
+      id, sku, status, credits, amount_cents, amount_currency, recipient_email, sender_name, note
+    )
     values (
-      ${id}, ${sku}, 'pending', ${spec.credits}, ${spec.amountCents},
+      ${id}, ${sku}, 'pending', ${spec.credits}, ${spec.amountCents}, ${spec.currency},
       ${gift?.recipientEmail ?? null}, ${gift?.senderName ?? null}, ${gift?.note ?? null}
     )`;
   return id;
@@ -122,9 +132,19 @@ export async function getOrder(id: string): Promise<Order | null> {
   if (!isUuid(id)) return null;
   await ensureSchema();
   const rows = await sql()`
-    select id, sku, status, credits from orders where id = ${id} limit 1`;
+    select id, sku, status, credits, amount_cents, amount_currency
+      from orders
+     where id = ${id}
+     limit 1`;
   const row = rows[0] as
-    | { id: string; sku: string; status: string; credits: number }
+    | {
+        id: string;
+        sku: string;
+        status: string;
+        credits: number;
+        amount_cents: number;
+        amount_currency: string;
+      }
     | undefined;
   if (!row || !isSku(row.sku)) return null;
   return {
@@ -132,6 +152,8 @@ export async function getOrder(id: string): Promise<Order | null> {
     sku: row.sku,
     status: row.status as OrderStatus,
     credits: Number(row.credits),
+    amountCents: Number(row.amount_cents),
+    amountCurrency: String(row.amount_currency).toLowerCase(),
     kind: SKUS[row.sku].kind,
   };
 }
@@ -148,7 +170,15 @@ export async function markPaid(args: {
   paymentIntent: string | null;
   sessionId: string | null;
   amountCents: number | null;
-}): Promise<"applied" | "duplicate" | "unknown-order" | "amount-mismatch"> {
+  currency: string | null;
+}): Promise<
+  | "applied"
+  | "already-paid"
+  | "duplicate"
+  | "unknown-order"
+  | "amount-mismatch"
+  | "currency-mismatch"
+> {
   await ensureSchema();
   const db = sql();
 
@@ -159,14 +189,16 @@ export async function markPaid(args: {
   const order = await getOrder(args.orderId);
   if (!order) return "unknown-order";
 
-  // Defence in depth: if the amount Stripe charged does not match the SKU's
-  // server-side price, something is misconfigured (a payment link edited in the
-  // dashboard, a reused link). Leave the order pending rather than fulfil it.
-  const expected = SKUS[order.sku].amountCents;
-  if (args.amountCents !== null && args.amountCents !== expected) {
+  // Defence in depth: compare against the order row captured at checkout time,
+  // not against today's mutable SKU table.
+  if (args.amountCents === null || args.amountCents !== order.amountCents) {
     return "amount-mismatch";
   }
+  if (!args.currency || args.currency.toLowerCase() !== order.amountCurrency) {
+    return "currency-mismatch";
+  }
 
+  let transitionedToPaid = false;
   if (order.status === "pending") {
     const updated = await db`
       update orders
@@ -181,21 +213,28 @@ export async function markPaid(args: {
     if (updated.length === 0) {
       const latest = await getOrder(args.orderId);
       if (!latest || latest.status !== "paid") return "unknown-order";
+    } else {
+      transitionedToPaid = true;
     }
   } else if (order.status !== "paid") {
     return "unknown-order";
   }
 
-  // Claim only after we know the order is paid (now or already). This keeps
-  // retries viable when we reject a webhook before fulfilment applies.
-  if (hasSeenEvent) return "duplicate";
+  // Claim after validation. If another worker raced to claim this id, treat
+  // this attempt as a duplicate event unless we are the one that just
+  // transitioned the order to paid.
+  let claimedEvent = false;
+  if (!hasSeenEvent) {
+    const claimed = await db`
+      insert into stripe_events (id) values (${args.eventId})
+      on conflict (id) do nothing
+      returning id`;
+    claimedEvent = claimed.length > 0;
+  }
 
-  const claimed = await db`
-    insert into stripe_events (id) values (${args.eventId})
-    on conflict (id) do nothing
-    returning id`;
-  if (claimed.length === 0) return "duplicate";
-  return "applied";
+  if (transitionedToPaid) return "applied";
+  if (hasSeenEvent || !claimedEvent) return "duplicate";
+  return "already-paid";
 }
 
 /**
