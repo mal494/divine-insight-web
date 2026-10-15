@@ -107,6 +107,16 @@ To check the gate actually holds, open `/api/order/<a made-up uuid>` - it must
 answer 404, and `/api/reading` with that id must answer 402. `/claim/<junk>`
 must show the expired-link page.
 
+### Unit tests
+
+`bun run test` covers the fulfilment decisions without Stripe or Postgres. See the table in `README.md`. The cases that matter here:
+
+- `markPaid` is idempotent on `stripe_events`. A second delivery of the same event id does not overwrite the stored payment intent.
+- A charged amount that disagrees with `SKUS[sku].amountCents` returns `amount-mismatch` and leaves the order `pending`.
+- `verifyStripeSignature` rejects timestamps more than 300 seconds from `now`, and accepts any `v1` candidate that matches during secret rotation.
+
+These tests mock `~/db`. They do not boot the dev server or hit `/api/stripe-webhook`.
+
 ## Database
 
 Four tables, created on first use (this template has no migration runner, so

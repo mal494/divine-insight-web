@@ -9,8 +9,8 @@ Card data comes from [Divine Insight Core](https://github.com/mal494/divine-insi
 rules.
 
 Paid one-time readings and the Divine Insight Pro subscription scaffold are
-different systems. See `PAYMENTS.md` before changing a gate, a price, or a
-Stripe call.
+different systems. Production hides Pro and ignores the dev `localStorage`
+flag. See `PAYMENTS.md` before changing a gate, a price, or a Stripe call.
 
 ## Prerequisites
 
@@ -37,7 +37,23 @@ bun run dev          # dev server on http://localhost:3000
 | Build + serve (deploy) | `bun run publish` → `publish.sh` |
 | Deploy to Vercel | `bun run go-live` → `go-live.sh` (needs `VERCEL_TOKEN`) |
 | Format | `bun run format` (Prettier, `--write .`) |
-| Type-check | `bunx tsc --noEmit` |
+| Type-check | `bun run typecheck` |
+| Unit tests | `bun run test` (Vitest, once) |
+| Watch tests | `bun run test:watch` |
+
+## Checks
+
+`bun run typecheck` runs `tsr generate` and then `tsc --noEmit -p tsconfig.typecheck.json`. That project includes `src/**/*.ts` and `src/**/*.tsx` except `src/routes/api/**/*.ts`, so a green type-check does not cover the API route files. `bunx tsc --noEmit` is not the CI command: it skips route-tree generation and uses the default project.
+
+`bun run test` runs Vitest once over `src/lib/__tests__/`:
+
+| File | What it locks |
+| --- | --- |
+| `entitlement.test.ts` | `resolveEntitlementFromOrders`: a paid order with credits wins over a spent paid order (`unlocked`); only spent paid orders are `spent`; a pending order is `awaiting-payment`; any other status is `locked` |
+| `orders.test.ts` | `markPaid`: a repeated Stripe event id returns `duplicate` and keeps the first payment intent and session; a charged amount that is not the SKU price returns `amount-mismatch` and leaves the order `pending`; an order id this server never created returns `unknown-order` |
+| `stripe-signature.test.ts` | `verifyStripeSignature`: a valid `v1` signature, any matching `v1` candidate while a secret is rotating, a timestamp more than 300 seconds off (`timestamp`), a bad signature (`mismatch`), and a header with no `t=` (`malformed`) |
+
+`.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. The job uses Node 22, `npm ci` (so `package-lock.json` is the CI lockfile; `bun.lock` is not), then `npm run typecheck`, `npm run test`, and `npm run build`. The `ci` script in `package.json` calls `npm run` for those three steps, so it needs npm on `PATH` even when you start it with Bun.
 
 > **Note:** `publish.sh` / `go-live.sh` / `serve.ts` assume a Linux-style sandbox
 > (`bash`, `setsid`, `lsof`, `sudo`, `curl`). On a plain Windows shell use
