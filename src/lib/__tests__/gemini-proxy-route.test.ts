@@ -57,6 +57,9 @@ describe("handleGeminiProxyPost", () => {
       "GEMINI_PROXY_RATE_LIMIT_PREFIX",
       "UPSTASH_REDIS_REST_URL",
       "UPSTASH_REDIS_REST_TOKEN",
+      "KV_REST_API_URL",
+      "KV_REST_API_TOKEN",
+      "KV_REST_API_READ_ONLY_TOKEN",
       "NODE_ENV",
     ]) {
       delete process.env[key];
