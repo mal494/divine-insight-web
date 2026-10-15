@@ -75,7 +75,7 @@ None are required to build or run the dev server. These matter at deploy time:
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `GEMINI_API_KEY` | `/api/gemini/v1beta/models/{model}:{operation}` | Server-only Gemini API key used by the proxy |
 | `GEMINI_PROXY_APP_TOKEN` | Gemini proxy auth gate | Shared app token expected in the `x-divine-app-token` request header |
-| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` | Gemini proxy durable limiter | Shared Redis limiter backend for Vercel/serverless instances |
+| `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (preferred), or `KV_REST_API_URL` + `KV_REST_API_TOKEN` (Vercel Upstash integration defaults) | Gemini proxy durable limiter | Shared Redis limiter backend for Vercel/serverless instances |
 | `GEMINI_ALLOWED_OPERATIONS` | Gemini proxy allow-list | Comma-separated operation allow-list (`generateContent` by default) |
 | `GEMINI_ALLOWED_MODELS` | Gemini proxy allow-list | Optional comma-separated model allow-list (empty = any model) |
 | `GEMINI_PROXY_MAX_REQUEST_BYTES` | Gemini proxy payload guard | Max JSON payload bytes (default `65536`) |
@@ -115,7 +115,7 @@ Behavior:
 
 - Proxy forwards the JSON body to Gemini using server-side `GEMINI_API_KEY`
 - Requests are rate limited per `token + client IP`
-- In production, a durable Redis limiter is required (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`); the endpoint fails closed when missing
+- In production, a durable Redis limiter is required (`UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN`, or Vercel Upstash integration defaults `KV_REST_API_URL` + `KV_REST_API_TOKEN`); the endpoint fails closed when missing
 - In local dev/test (`NODE_ENV != production`), it safely falls back to an in-memory limiter
 
 Error contract:

@@ -63,6 +63,11 @@ type GlobalWithGeminiProxy = typeof globalThis & {
     | undefined;
 };
 
+type RedisRestCredentials = {
+  url: string;
+  token: string;
+};
+
 export function getGeminiProxyAuthHeaderName(): string {
   return AUTH_HEADER;
 }
@@ -135,7 +140,7 @@ function readRateLimitConfig(env: NodeJS.ProcessEnv): RateLimitConfig {
     env,
   );
   const keyPrefix = env.GEMINI_PROXY_RATE_LIMIT_PREFIX?.trim() || DEFAULT_RATE_LIMIT_PREFIX;
-  const hasRedisConfig = Boolean(env.UPSTASH_REDIS_REST_URL && env.UPSTASH_REDIS_REST_TOKEN);
+  const hasRedisConfig = Boolean(readRedisRestCredentials(env));
   const mode: RateLimitMode = hasRedisConfig
     ? "redis"
     : env.NODE_ENV === "production"
@@ -193,8 +198,11 @@ function getMemoryRateLimitState(): MemoryRateLimitState {
 }
 
 function getRedisClient(env: NodeJS.ProcessEnv): Redis {
-  const url = env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
-  const token = env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
+  const credentials = readRedisRestCredentials(env);
+  if (!credentials) {
+    throw new Error("missing redis rest credentials");
+  }
+  const { url, token } = credentials;
   const cacheKey = `${url}::${token}`;
   const scope = globalThis as GlobalWithGeminiProxy;
 
@@ -206,6 +214,22 @@ function getRedisClient(env: NodeJS.ProcessEnv): Redis {
   }
 
   return scope.__geminiProxyRedisClient.client;
+}
+
+function readRedisRestCredentials(env: NodeJS.ProcessEnv): RedisRestCredentials | null {
+  const upstashUrl = env.UPSTASH_REDIS_REST_URL?.trim() ?? "";
+  const upstashToken = env.UPSTASH_REDIS_REST_TOKEN?.trim() ?? "";
+  if (upstashUrl && upstashToken) {
+    return { url: upstashUrl, token: upstashToken };
+  }
+
+  const kvUrl = env.KV_REST_API_URL?.trim() ?? "";
+  const kvToken = env.KV_REST_API_TOKEN?.trim() ?? "";
+  if (kvUrl && kvToken) {
+    return { url: kvUrl, token: kvToken };
+  }
+
+  return null;
 }
 
 function parseRedisEvalResponse(value: unknown): [0 | 1, number] {
