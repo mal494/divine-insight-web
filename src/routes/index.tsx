@@ -1,3 +1,4 @@
+import { AuthIndicator } from "~/components/auth-indicator";
 import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AllCardsModal } from "~/components/all-cards-modal";
@@ -298,6 +299,7 @@ function Home() {
             <span className="hidden text-[10px] tracking-[0.35em] text-cream-100/40 uppercase lg:inline">
               The 78-Card Deck · Readings from $2.99
             </span>
+            <AuthIndicator />
           </div>
         </header>
 
