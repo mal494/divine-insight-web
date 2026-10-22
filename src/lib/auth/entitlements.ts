@@ -1,6 +1,7 @@
 /**
- * Server-side Pro entitlement check. Nothing writes to `entitlements` yet
- * (billing lands in a later milestone), so this is false for everyone today.
+ * Server-side Pro entitlement check. Rows are written only by the Pro
+ * subscription webhook (lib/billing/subscription-webhook.ts). past_due keeps
+ * access while Stripe retries (grace = until current_period_end).
  */
 import { getAuthPool } from "./db";
 
@@ -10,7 +11,7 @@ export async function hasPro(userId: string, db: Queryable = getAuthPool()): Pro
   if (!userId) return false;
   const { rows } = await db.query(
     `select 1 from entitlements
-      where user_id = $1 and plan = 'pro' and status in ('active', 'trialing')
+      where user_id = $1 and plan = 'pro' and status in ('active', 'trialing', 'past_due')
         and (current_period_end is null or current_period_end > now())
       limit 1`,
     [userId],

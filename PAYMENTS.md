@@ -189,3 +189,14 @@ builds only. A production build has no toggle and no upgrade button.
   to verify.
 - Pro is hidden in production and is not sold. The dev toggle is the only way
   to preview it. It does not write `orders`.
+
+## Pro subscription (P3)
+
+Server-created Stripe Checkout (subscription mode) via `POST /api/pro/checkout`
+and Customer Portal via `POST /api/pro/portal` (both require a signed-in user).
+Entitlements are written only by `POST /api/stripe-subscription-webhook`
+(own signing secret, `STRIPE_PRO_WEBHOOK_SECRET`), which handles
+`checkout.session.completed` (mode=subscription), `customer.subscription.created|updated|deleted`,
+`invoice.paid` and `invoice.payment_failed`, dedupes by event id, and re-fetches the
+subscription from Stripe. Apply `migrations/0002_pro_subscriptions.sql` first.
+One-time orders and `/api/stripe-webhook` are unchanged.

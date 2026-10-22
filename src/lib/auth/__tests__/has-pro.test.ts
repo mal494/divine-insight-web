@@ -18,3 +18,12 @@ describe("hasPro", () => {
     expect(db.query).not.toHaveBeenCalled();
   });
 });
+
+describe("hasPro statuses", () => {
+  test("query grants active, trialing and past_due only", async () => {
+    const db = { query: vi.fn(async (_q: string, _v: unknown[]) => ({ rows: [] as unknown[] })) };
+    await hasPro("u1", db);
+    expect(db.query.mock.calls[0][0]).toMatch(/status in \('active', 'trialing', 'past_due'\)/);
+    expect(db.query.mock.calls[0][0]).toMatch(/current_period_end > now\(\)/);
+  });
+});
