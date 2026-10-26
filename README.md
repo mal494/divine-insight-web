@@ -99,6 +99,27 @@ Create a local `.env` (gitignored) if you need any of these during development:
 cp .env.example .env   # if present; otherwise create .env manually
 ```
 
+## Accounts (magic link sign-in)
+
+Better Auth with email magic links only (no passwords). Users, sessions, hashed
+15-minute tokens and the rate limiter live in Neon Postgres (`pg` Pool on the
+pooled `DATABASE_URL`, `attachDatabasePool`). Emails link to `/auth/confirm`, a
+page with a single button that POSTs to `/api/auth-confirm`, so link scanners
+can't burn the token. Sign-in page: `/signin`. Emails go through Resend
+(`RESEND_API_KEY`, `GIFT_FROM_EMAIL`).
+
+Env vars: `BETTER_AUTH_SECRET`, `DATABASE_URL` (pooled), `BETTER_AUTH_URL`.
+
+Migration (run before deploying, against each Neon branch, using the unpooled URL):
+
+```sh
+psql "$DATABASE_URL_UNPOOLED" -f migrations/0001_pro_auth.sql
+```
+
+`hasPro(userId)` in `src/lib/auth/entitlements.ts` reads the `entitlements`
+table. Nothing writes to it yet, so it returns false; Pro stays hidden.
+Node 22 is pinned (`engines`, `.nvmrc`).
+
 ## Gemini proxy contract (Android)
 
 Endpoint:
