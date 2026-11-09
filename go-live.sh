@@ -43,8 +43,9 @@
 #                           host (pooler suffix ignored), port and db name must
 #                           match the target's DATABASE_URL from `vercel env
 #                           pull`, or, when that value is sensitive and cannot
-#                           be pulled, GO_LIVE_EXPECTED_DB_HOST (copied from
-#                           the Vercel/Neon dashboard). Mismatch aborts.
+#                           be pulled (and only then), GO_LIVE_EXPECTED_DB_HOST
+#                           + GO_LIVE_EXPECTED_DB_NAME (copied from the
+#                           Vercel/Neon dashboard). Any mismatch aborts.
 #   GO_LIVE_SCHEMA_CONFIRMED=1  you already applied the migrations this code
 #                           needs (see PAYMENTS.md / the PR notes).
 #   GO_LIVE_SET_STANDARD_PROTECTION=1  opt-in, see above.
@@ -194,18 +195,35 @@ if [ -n "${GO_LIVE_MIGRATIONS:-}" ]; then
   chmod 700 "$PULL_DIR"
   "${VERCEL[@]}" env pull "$PULL_DIR/project.env" --environment "$TARGET" --yes \
     "${SCOPE_ARGS[@]}" >/dev/null 2>&1 || true
-  if [ -s "$PULL_DIR/project.env" ] &&
-    PG_URL="$DATABASE_URL_UNPOOLED" bun "$PG_URL_HELPER" same-project-db "$PULL_DIR/project.env"; then
+  # Exit 0 = same database, 1 = mismatch or invalid (always fatal), 3 = the
+  # project's DATABASE_URL could not be read at all. Only 3 may fall back to
+  # GO_LIVE_EXPECTED_DB_HOST + GO_LIVE_EXPECTED_DB_NAME; the fallback can never
+  # override a real mismatch.
+  DB_CHECK=0
+  PG_URL="$DATABASE_URL_UNPOOLED" bun "$PG_URL_HELPER" same-project-db "$PULL_DIR/project.env" ||
+    DB_CHECK=$?
+  if [ "$DB_CHECK" -eq 0 ]; then
     echo "    matches the project's DATABASE_URL"
-  elif [ -n "${GO_LIVE_EXPECTED_DB_HOST:-}" ] &&
+  elif [ "$DB_CHECK" -eq 3 ] && [ -n "${GO_LIVE_EXPECTED_DB_HOST:-}" ] &&
+    [ -n "${GO_LIVE_EXPECTED_DB_NAME:-}" ]; then
+    DB_CHECK=0
     PG_URL="$DATABASE_URL_UNPOOLED" EXPECTED_DB_HOST="$GO_LIVE_EXPECTED_DB_HOST" \
-      bun "$PG_URL_HELPER" same-host; then
-    echo "    matches GO_LIVE_EXPECTED_DB_HOST"
+      EXPECTED_DB_NAME="$GO_LIVE_EXPECTED_DB_NAME" bun "$PG_URL_HELPER" same-host || DB_CHECK=$?
+    if [ "$DB_CHECK" -ne 0 ]; then
+      rm -rf "$PULL_DIR"
+      die "DATABASE_URL_UNPOOLED does not match GO_LIVE_EXPECTED_DB_HOST/GO_LIVE_EXPECTED_DB_NAME; nothing applied."
+    fi
+    echo "    project DATABASE_URL unreadable; matches GO_LIVE_EXPECTED_DB_HOST/GO_LIVE_EXPECTED_DB_NAME"
+  elif [ "$DB_CHECK" -eq 3 ]; then
+    rm -rf "$PULL_DIR"
+    die "could not read the project's $TARGET DATABASE_URL to check DATABASE_URL_UNPOOLED against; nothing applied.
+  If the project's value is sensitive and cannot be pulled, set GO_LIVE_EXPECTED_DB_HOST to the
+  endpoint host and GO_LIVE_EXPECTED_DB_NAME to the database name shown in the Vercel/Neon
+  dashboard for $TARGET (pooler suffix optional)."
   else
     rm -rf "$PULL_DIR"
-    die "DATABASE_URL_UNPOOLED does not match (or could not be checked against) the project's $TARGET DATABASE_URL; nothing applied.
-  If the project's value is sensitive and cannot be pulled, set GO_LIVE_EXPECTED_DB_HOST to the
-  endpoint host shown in the Vercel/Neon dashboard for $TARGET (pooler suffix optional)."
+    die "DATABASE_URL_UNPOOLED does not match the project's $TARGET DATABASE_URL; nothing applied.
+  (GO_LIVE_EXPECTED_DB_HOST is only consulted when the project's value cannot be read.)"
   fi
   rm -rf "$PULL_DIR"
   trap - EXIT

@@ -90,16 +90,35 @@ describe("CLI (as go-live.sh calls it)", () => {
     expect(ok.stderr + ok.stdout + bad.stderr + bad.stdout).not.toContain("s3cr");
   });
 
-  test("same-project-db fails closed when the project's value is not readable", () => {
+  test("same-project-db: an unreadable project value exits 3 (the only fallback code)", () => {
     const empty = join(dir, "empty.env");
     writeFileSync(empty, 'DATABASE_URL=""\n');
-    expect(run(["same-project-db", empty], { PG_URL: UNPOOLED }).status).toBe(1);
+    expect(run(["same-project-db", empty], { PG_URL: UNPOOLED }).status).toBe(3);
+    const none = join(dir, "none.env");
+    writeFileSync(none, "OTHER=1\n");
+    expect(run(["same-project-db", none], { PG_URL: UNPOOLED }).status).toBe(3);
+    expect(run(["same-project-db", join(dir, "missing.env")], { PG_URL: UNPOOLED }).status).toBe(3);
   });
 
-  test("same-host compares against GO_LIVE_EXPECTED_DB_HOST (pooler suffix ignored)", () => {
+  test("same-project-db: a real mismatch or an invalid project URL is 1, never 3", () => {
+    expect(run(["same-project-db", envFile], { PG_URL: OTHER }).status).toBe(1);
+    const otherDb = join(dir, "otherdb.env");
+    writeFileSync(otherDb, `DATABASE_URL="${POOLED.replace("/neondb", "/otherdb")}"\n`);
+    expect(run(["same-project-db", otherDb], { PG_URL: UNPOOLED }).status).toBe(1);
+    const junk = join(dir, "junk.env");
+    writeFileSync(junk, "DATABASE_URL=not-a-url\n");
+    expect(run(["same-project-db", junk], { PG_URL: UNPOOLED }).status).toBe(1);
+  });
+
+  test("same-host compares host (pooler suffix ignored) AND database name", () => {
     const host = "ep-cool-name-123-pooler.us-east-2.aws.neon.tech";
-    expect(run(["same-host"], { PG_URL: UNPOOLED, EXPECTED_DB_HOST: host }).status).toBe(0);
-    expect(run(["same-host"], { PG_URL: OTHER, EXPECTED_DB_HOST: host }).status).toBe(1);
+    const env = { EXPECTED_DB_HOST: host, EXPECTED_DB_NAME: "neondb" };
+    expect(run(["same-host"], { PG_URL: UNPOOLED, ...env }).status).toBe(0);
+    expect(run(["same-host"], { PG_URL: OTHER, ...env }).status).toBe(1);
+    expect(run(["same-host"], { PG_URL: UNPOOLED, ...env, EXPECTED_DB_NAME: "otherdb" }).status).toBe(1);
+    // Both are required.
+    expect(run(["same-host"], { PG_URL: UNPOOLED, EXPECTED_DB_HOST: host }).status).toBe(2);
+    expect(run(["same-host"], { PG_URL: UNPOOLED, EXPECTED_DB_NAME: "neondb" }).status).toBe(2);
   });
 
   test("libpq-env rejects a bad URL with exit 1 and prints nothing to stdout", () => {
@@ -117,5 +136,7 @@ describe("CLI (as go-live.sh calls it)", () => {
 
   test("readDotenv reads vercel env pull output", () => {
     expect(readDotenv('A="1"\nexport B=2\n# c\n')).toEqual({ A: "1", B: "2" });
+    // Trailing whitespace / CRLF is not part of the value (QA r6 N7).
+    expect(readDotenv('A="1"   \r\nB=2 \t\nC = x \n')).toEqual({ A: "1", B: "2", C: "x" });
   });
 });

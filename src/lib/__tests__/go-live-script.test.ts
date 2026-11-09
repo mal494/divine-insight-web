@@ -1,6 +1,7 @@
 /**
- * Static guards for go-live.sh (QA round 4). Nothing here runs the script or
- * talks to Vercel; it only reads the file and asks bash to parse it.
+ * Guards for go-live.sh (QA rounds 4-6). Nothing here talks to Vercel or a
+ * database: most checks read the file; one runs the DB-identity block alone
+ * with `bun` stubbed out.
  */
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -88,7 +89,54 @@ describe("go-live.sh", () => {
     expect(confirm).toBeLessThan(psql);
     expect(code).toMatch(/env pull "\$PULL_DIR\/project\.env" --environment "\$TARGET"/);
     expect(code).toMatch(/trap 'rm -rf "\$PULL_DIR"' EXIT/);
-    expect(code).toMatch(/does not match \(or could not be checked against\)/);
+    expect(code).toMatch(/could not read the project's \$TARGET DATABASE_URL/);
+  });
+
+  test("GO_LIVE_EXPECTED_DB_HOST is a fallback only when the project's URL is unreadable (exit 3)", () => {
+    const start = code.indexOf("same-project-db");
+    const block = code.slice(start, code.indexOf("Type 'apply' to continue"));
+    // The fallback branch is gated on exit code 3, and needs the db name too.
+    expect(block).toMatch(/elif \[ "\$DB_CHECK" -eq 3 \] && \[ -n "\$\{GO_LIVE_EXPECTED_DB_HOST:-\}" \] &&\s*\n\s*\[ -n "\$\{GO_LIVE_EXPECTED_DB_NAME:-\}" \]/);
+    expect(block).toMatch(/EXPECTED_DB_NAME="\$GO_LIVE_EXPECTED_DB_NAME"/);
+    // same-host is only reachable from that branch.
+    const fallback = block.indexOf('"$DB_CHECK" -eq 3 ] && [ -n');
+    expect(block.indexOf("same-host")).toBeGreaterThan(fallback);
+    expect(block).toMatch(/GO_LIVE_EXPECTED_DB_HOST is only consulted when the project's value cannot be read/);
+  });
+
+  test("the DB check, run for real: mismatch is fatal even with GO_LIVE_EXPECTED_DB_HOST set", () => {
+    // Execute just the verification block with stubbed `bun` exit codes.
+    const start = code.indexOf("  DB_CHECK=0");
+    const end = code.indexOf('  rm -rf "$PULL_DIR"\n  trap - EXIT');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const block = code.slice(start, end);
+    const harness = (projectRc: number, hostRc: number, env: Record<string, string>) =>
+      spawnSync(
+        "bash",
+        [
+          "-c",
+          `set -euo pipefail
+die() { echo "DIE: $*"; exit 9; }
+bun() { if [ "$2" = same-project-db ]; then return ${projectRc}; else return ${hostRc}; fi; }
+PG_URL_HELPER=x; PULL_DIR=$(mktemp -d); TARGET=production; DATABASE_URL_UNPOOLED=u
+${block}
+echo PASSED`,
+        ],
+        { encoding: "utf8", env: { PATH: process.env.PATH ?? "", ...env } },
+      );
+    const fb = { GO_LIVE_EXPECTED_DB_HOST: "ep-x.neon.tech", GO_LIVE_EXPECTED_DB_NAME: "neondb" };
+    expect(harness(0, 1, {}).stdout).toMatch(/PASSED/);
+    // Real mismatch: fatal, fallback never consulted even though it would match.
+    const mismatch = harness(1, 0, fb);
+    expect(mismatch.status).toBe(9);
+    expect(mismatch.stdout).toMatch(/does not match the project's/);
+    // Unreadable project value: fallback decides.
+    expect(harness(3, 0, fb).stdout).toMatch(/PASSED/);
+    expect(harness(3, 1, fb).status).toBe(9);
+    // Unreadable and no (complete) fallback: fatal.
+    expect(harness(3, 0, {}).status).toBe(9);
+    expect(harness(3, 0, { GO_LIVE_EXPECTED_DB_HOST: "ep-x.neon.tech" }).status).toBe(9);
   });
 
   test("the DB URL is parsed by the strict helper, not ad hoc", () => {

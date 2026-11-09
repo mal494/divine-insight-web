@@ -5,9 +5,14 @@
 //
 //   bun scripts/pg-url.mjs libpq-env               # reads $PG_URL
 //   bun scripts/pg-url.mjs same-project-db <file>  # $PG_URL vs DATABASE_URL in a dotenv file
-//   bun scripts/pg-url.mjs same-host               # $PG_URL host vs $EXPECTED_DB_HOST
+//   bun scripts/pg-url.mjs same-host               # $PG_URL host + db name vs
+//                                                  # $EXPECTED_DB_HOST / $EXPECTED_DB_NAME
 //
-// Exit codes: 0 ok, 1 mismatch / invalid, 2 usage.
+// Exit codes: 0 ok, 1 mismatch / invalid, 2 usage,
+//             3 (same-project-db only) the project's DATABASE_URL could not be
+//               read at all (no file, or an empty/absent value, e.g. a
+//               sensitive var). Only this code lets go-live.sh fall back to
+//               the expected host/name; a real mismatch is always 1.
 import { readFileSync } from "node:fs";
 
 const ALLOWED_PROTOCOLS = new Set(["postgres:", "postgresql:"]);
@@ -83,9 +88,9 @@ export function sameDatabase(a, b) {
 export function readDotenv(text) {
   const out = {};
   for (const line of text.split(/\r?\n/)) {
-    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/.exec(line);
+    const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/.exec(line);
     if (!m) continue;
-    let v = m[2];
+    let v = m[2].trim();
     if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
     out[m[1]] = v;
   }
@@ -124,11 +129,18 @@ function main(argv, env) {
     }
     if (cmd === "same-project-db") {
       if (!file) return 2;
-      const project = readDotenv(readFileSync(file, "utf8"));
+      let text;
+      try {
+        text = readFileSync(file, "utf8");
+      } catch {
+        console.error("could not read the project's env (vercel env pull failed)");
+        return 3;
+      }
+      const project = readDotenv(text);
       const ref = project.DATABASE_URL_UNPOOLED || project.DATABASE_URL;
       if (!ref) {
         console.error("the project's env has no readable DATABASE_URL (sensitive vars cannot be pulled)");
-        return 1;
+        return 3;
       }
       const ok = sameDatabase(parsePgUrl(env.PG_URL), parsePgUrl(ref));
       const p = dbIdentity(parsePgUrl(ref));
@@ -137,11 +149,15 @@ function main(argv, env) {
       return ok ? 0 : 1;
     }
     if (cmd === "same-host") {
-      const expected = String(env.EXPECTED_DB_HOST || "").toLowerCase().replace(/-pooler(?=\.)/, "");
-      if (!expected) return 2;
+      const expected = String(env.EXPECTED_DB_HOST || "").trim().toLowerCase().replace(/-pooler(?=\.)/, "");
+      const expectedDb = String(env.EXPECTED_DB_NAME || "").trim();
+      if (!expected || !expectedDb) {
+        console.error("same-host needs both EXPECTED_DB_HOST and EXPECTED_DB_NAME");
+        return 2;
+      }
       const q = dbIdentity(parsePgUrl(env.PG_URL));
-      console.error(`expected host: ${expected}; migration target: ${q.host}/${q.database}`);
-      return q.host === expected ? 0 : 1;
+      console.error(`expected: ${expected}/${expectedDb}; migration target: ${q.host}/${q.database}`);
+      return q.host === expected && q.database === expectedDb ? 0 : 1;
     }
     return 2;
   } catch (err) {
