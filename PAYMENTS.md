@@ -94,7 +94,9 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
         Note the order ids and the two counts.
      3. Reset exactly those rows, in one transaction with an explicit `uuid[]`
         and a row-count check. If either count differs, the DO block raises and
-        the whole transaction rolls back (run with `psql -v ON_ERROR_STOP=1`):
+        the whole transaction rolls back. Save it as `reset.sql` and run it
+        with `psql -X -v ON_ERROR_STOP=1 -f reset.sql` (credentials from
+        `PGSERVICE` / `~/.pgpass`, never in the command line):
         ```sql
         \set ON_ERROR_STOP on
         BEGIN;
@@ -129,6 +131,11 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
         END $$;
         COMMIT;
         ```
+        **Confirm the output ends with `COMMIT`** (after `BEGIN` and `DO`) and
+        psql exits 0. Anything else (an `ERROR:` line such as `recipient reset:
+        expected 2 rows, got 1`, a non-zero exit, or a final `ROLLBACK`) means
+        nothing was changed: re-run step 2 and fix the ids or counts. Never
+        finish a half-applied reset by hand.
      4. Re-run delivery by resending each order's `checkout.session.completed`
         event from Stripe (Dashboard → Developers → Events → Resend, events up
         to 15 days old; `stripe events resend <evt_id>` up to 30 days). The
