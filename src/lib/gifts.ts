@@ -40,37 +40,87 @@ export class GiftSchemaMissingError extends Error {
 export type GiftEmailKind = "recipient" | "buyer";
 
 /**
- * Reserve the one send of a gift email. Returns true for exactly one caller
- * per (order, kind), whichever code path minted the token and however many
- * times Stripe delivers the event. Call releaseGiftEmail if the send fails.
+ * How long one delivery attempt holds the right to send an email. A process
+ * that dies mid-send (after reserving, before recording the result) loses the
+ * lease when it expires, so a Stripe retry can send the email instead of it
+ * being lost. Longer than any send attempt (fetch timeout + function limit).
  */
-export async function reserveGiftEmail(orderId: string, kind: GiftEmailKind): Promise<boolean> {
+export const GIFT_EMAIL_LEASE_SECONDS = 120;
+
+/**
+ * Claim the right to send one gift email (per order and kind).
+ *   "reserved" — this caller must send, then call markGiftEmailSent on
+ *                success or releaseGiftEmail on failure.
+ *   "sent"     — already sent and recorded; nothing to do.
+ *   "busy"     — another delivery holds an unexpired lease (in flight, or it
+ *                crashed less than GIFT_EMAIL_LEASE_SECONDS ago). The caller
+ *                should answer non-2xx so Stripe retries later.
+ * `x_emailed_at` is only ever set after a successful send, so a crash can
+ * never mark an unsent email as sent.
+ */
+export async function reserveGiftEmail(
+  orderId: string,
+  kind: GiftEmailKind,
+): Promise<"reserved" | "sent" | "busy"> {
   const db = sql();
   try {
-    const rows =
+    const won =
       kind === "recipient"
         ? await db`
-            update gift_claims set recipient_emailed_at = now()
-             where order_id = ${orderId} and recipient_emailed_at is null
+            update gift_claims
+               set recipient_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
+             where order_id = ${orderId}
+               and recipient_emailed_at is null
+               and (recipient_email_lease_until is null or recipient_email_lease_until < now())
             returning order_id`
         : await db`
-            update gift_claims set buyer_emailed_at = now()
-             where order_id = ${orderId} and buyer_emailed_at is null
+            update gift_claims
+               set buyer_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
+             where order_id = ${orderId}
+               and buyer_emailed_at is null
+               and (buyer_email_lease_until is null or buyer_email_lease_until < now())
             returning order_id`;
-    return rows.length > 0;
+    if (won.length > 0) return "reserved";
+    const state =
+      kind === "recipient"
+        ? await db`
+            select recipient_emailed_at is not null as sent
+              from gift_claims where order_id = ${orderId}`
+        : await db`
+            select buyer_emailed_at is not null as sent
+              from gift_claims where order_id = ${orderId}`;
+    return (state[0] as { sent?: boolean } | undefined)?.sent ? "sent" : "busy";
   } catch (err) {
     if (isMissingColumn(err)) throw new GiftSchemaMissingError(err);
     throw err;
   }
 }
 
-/** Undo a reservation after a failed send, so a later delivery may retry. */
+/** Record a successful send: the email is never sent again for this order. */
+export async function markGiftEmailSent(orderId: string, kind: GiftEmailKind): Promise<void> {
+  const db = sql();
+  if (kind === "recipient") {
+    await db`
+      update gift_claims set recipient_emailed_at = now(), recipient_email_lease_until = null
+       where order_id = ${orderId}`;
+  } else {
+    await db`
+      update gift_claims set buyer_emailed_at = now(), buyer_email_lease_until = null
+       where order_id = ${orderId}`;
+  }
+}
+
+/** Give the lease back after a failed send, so the next delivery retries at once. */
 export async function releaseGiftEmail(orderId: string, kind: GiftEmailKind): Promise<void> {
   const db = sql();
   if (kind === "recipient") {
-    await db`update gift_claims set recipient_emailed_at = null where order_id = ${orderId}`;
+    await db`
+      update gift_claims set recipient_email_lease_until = null
+       where order_id = ${orderId} and recipient_emailed_at is null`;
   } else {
-    await db`update gift_claims set buyer_emailed_at = null where order_id = ${orderId}`;
+    await db`
+      update gift_claims set buyer_email_lease_until = null
+       where order_id = ${orderId} and buyer_emailed_at is null`;
   }
 }
 

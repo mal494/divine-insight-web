@@ -14,20 +14,27 @@
  * Always answer 200 once the signature is good, even when we decide not to
  * fulfil — a non-2xx makes Stripe retry for days over something a retry will
  * never fix. Refusals are logged instead. The exception is a paid gift whose
- * delivery bookkeeping hit a database error (claim token not minted, or the
- * emailed-at reservation failed): that answers 500 so Stripe retries, and the
- * retry, which markPaid reports as "duplicate" or "already-paid", re-runs
- * the idempotent gift steps until the claim link exists and each email has
- * gone out once.
+ * delivery is not finished (claim token not minted, a gift email failed
+ * transiently or is held by an in-flight delivery, or a bookkeeping error):
+ * that answers 500 so Stripe retries, and the retry, which markPaid reports
+ * as "duplicate" or "already-paid", re-runs the idempotent gift steps until
+ * the claim link exists and each email has been sent and recorded once.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { claimUrlFor, sendGiftBuyerEmail, sendGiftEmail } from "~/lib/gift-email";
+import {
+  claimUrlFor,
+  giftEmailConfigured,
+  sendGiftBuyerEmail,
+  sendGiftEmail,
+  type GiftSendResult,
+} from "~/lib/gift-email";
 import {
   GIFT_EMAIL_MIGRATION,
   GiftSchemaMissingError,
   type GiftEmailKind,
   createGiftClaim,
   getGiftDetails,
+  markGiftEmailSent,
   releaseGiftEmail,
   reserveGiftEmail,
 } from "~/lib/gifts";
@@ -169,29 +176,53 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
       );
     }
 
-    // Each email is reserved (recipient_emailed_at / buyer_emailed_at) before
-    // it is sent, so it goes out exactly once whoever minted the token and
-    // however often Stripe delivers. This block runs on EVERY paid outcome
-    // ("applied", "already-paid", "duplicate"), so if an earlier delivery
-    // crashed after markPaid committed, the Stripe retry finishes the job.
-    // A failed send releases the reservation (best-effort: the buyer always
-    // sees the link). A database error while reserving or releasing answers
-    // 500 so Stripe retries, instead of silently dropping the email.
+    // Gift emails are AT-LEAST-ONCE until recorded, then never again:
+    //  - each send holds a short lease (gift_claims.*_email_lease_until);
+    //  - *_emailed_at is set only AFTER Resend accepted the email;
+    //  - a failed send releases the lease and answers 500, so Stripe retries;
+    //  - a crash mid-send leaves only the lease, which expires, so the retry
+    //    sends it (Resend's Idempotency-Key de-duplicates the rare case where
+    //    the crash came after Resend accepted it).
+    // This block runs on EVERY paid outcome ("applied", "already-paid",
+    // "duplicate"), so a retry after any crash finishes the job.
     const claimUrl = claimUrlFor(claim.token, request.url);
     const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
+    if (!giftEmailConfigured()) {
+      // A retry cannot fix configuration; the buyer sees the link on the
+      // confirmation page. Do not reserve anything.
+      console.error("gift emails not configured (RESEND_API_KEY / GIFT_FROM_EMAIL); skipped", {
+        orderId,
+      });
+      return new Response(result, { status: 200 });
+    }
+    if (!buyerEmail && claim.created) {
+      console.warn("paid gift has no buyer email for receipt", { orderId });
+    }
+    const pending: string[] = [];
     try {
       if (gift.recipientEmail) {
         const to = gift.recipientEmail;
-        await deliverOnce(orderId, "recipient", () =>
-          sendGiftEmail({ to, senderName: gift.senderName, note: gift.note, claimUrl }),
+        const outcome = await deliverOnce(orderId, "recipient", () =>
+          sendGiftEmail({
+            to,
+            senderName: gift.senderName,
+            note: gift.note,
+            claimUrl,
+            idempotencyKey: `gift-recipient-${orderId}`,
+          }),
         );
+        if (outcome === "retry") pending.push("recipient");
       }
-      if (!buyerEmail) {
-        if (claim.created) console.warn("paid gift has no buyer email for receipt", { orderId });
-      } else {
-        await deliverOnce(orderId, "buyer", () =>
-          sendGiftBuyerEmail({ to: buyerEmail, recipientEmail: gift.recipientEmail, claimUrl }),
+      if (buyerEmail) {
+        const outcome = await deliverOnce(orderId, "buyer", () =>
+          sendGiftBuyerEmail({
+            to: buyerEmail,
+            recipientEmail: gift.recipientEmail,
+            claimUrl,
+            idempotencyKey: `gift-buyer-${orderId}`,
+          }),
         );
+        if (outcome === "retry") pending.push("buyer");
       }
     } catch (err) {
       if (err instanceof GiftSchemaMissingError) {
@@ -203,29 +234,47 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
       }
       return new Response("gift delivery pending", { status: 500 });
     }
+    if (pending.length > 0) {
+      console.error("gift email not delivered yet; asking Stripe to retry", { orderId, pending });
+      return new Response("gift delivery pending", { status: 500 });
+    }
   }
 
   return new Response(result, { status: 200 });
 }
 
 /**
- * Send one gift email at most once per (order, kind). Reservation errors
- * propagate (the caller answers 500 → Stripe retries); a send that fails or
- * throws releases the reservation so a later delivery may try again.
+ * Send one gift email for (order, kind) unless it was already sent.
+ *   "done"  — sent now or earlier, or permanently rejected (logged).
+ *   "retry" — a send failed transiently, or another delivery holds the lease;
+ *             the caller answers non-2xx so Stripe redelivers.
+ * Bookkeeping errors propagate (the caller answers 500).
  */
 async function deliverOnce(
   orderId: string,
   kind: GiftEmailKind,
-  send: () => Promise<boolean>,
-): Promise<void> {
-  if (!(await reserveGiftEmail(orderId, kind))) return;
-  let sent = false;
+  send: () => Promise<GiftSendResult>,
+): Promise<"done" | "retry"> {
+  const lease = await reserveGiftEmail(orderId, kind);
+  if (lease === "sent") return "done";
+  if (lease === "busy") return "retry";
+  let result: GiftSendResult;
   try {
-    sent = await send();
+    result = await send();
   } catch (err) {
     console.error("gift email send threw for order", orderId, kind, err);
+    result = "failed";
   }
-  if (!sent) await releaseGiftEmail(orderId, kind);
+  if (result === "sent") {
+    await markGiftEmailSent(orderId, kind);
+    return "done";
+  }
+  await releaseGiftEmail(orderId, kind);
+  if (result === "rejected") {
+    console.error("gift email permanently rejected; not retrying", { orderId, kind });
+    return "done";
+  }
+  return "retry";
 }
 
 /**

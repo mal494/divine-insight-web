@@ -5,6 +5,11 @@
  * idempotent gift steps: mint the one claim token and send each email once,
  * honouring recipient_emailed_at / buyer_emailed_at.
  *
+ * Gift emails are at-least-once until recorded: a send lease
+ * (*_email_lease_until) that expires if the process dies, *_emailed_at set
+ * only after Resend accepted the email, and non-2xx on a failed send so
+ * Stripe retries. Once recorded, an email is never sent again.
+ *
  * Real orders.markPaid, real gifts.ts, real webhook, against an in-memory SQL
  * double that can be told to fail ("crash") at a given step. Only the
  * signature check and the outbound email calls are stubbed. Any DDL throws.
@@ -19,12 +24,16 @@ type Claim = {
   claimed: boolean;
   recipient_emailed_at: Date | null;
   buyer_emailed_at: Date | null;
+  recipient_email_lease_until: number | null;
+  buyer_email_lease_until: number | null;
 };
 
 let order: Record<string, unknown>;
 let events: Set<string>;
 let claims: Claim[];
 let crashAt: string | null;
+/** Fake DB clock (ms) for lease expiry. */
+let clock: number;
 
 function norm(strings: TemplateStringsArray): string {
   return strings.join(" ? ").replace(/\s+/g, " ").trim().toLowerCase();
@@ -74,23 +83,46 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
       claimed: false,
       recipient_emailed_at: null,
       buyer_emailed_at: null,
+      recipient_email_lease_until: null,
+      buyer_email_lease_until: null,
     });
     return [{ token, created: true }];
   }
-  const flag = /^update gift_claims set (recipient|buyer)_emailed_at = (now\(\)|null)/.exec(q);
-  if (flag) {
-    const kind = flag[1] as "recipient" | "buyer";
-    const key = `${kind}_emailed_at` as const;
-    const c = claims.find((x) => x.order_id === values[0]);
-    if (!c) return [];
-    if (flag[2] === "null") {
-      c[key] = null;
-      return [];
-    }
+  const lease = /^update gift_claims set (recipient|buyer)_email_lease_until = now\(\) \+ make_interval/.exec(q);
+  if (lease) {
+    const kind = lease[1] as "recipient" | "buyer";
     step(`reserve-${kind}`);
-    if (c[key]) return [];
-    c[key] = new Date();
-    return [{ order_id: c.order_id }];
+    const [secs, orderId] = values as [number, string];
+    const c = claims.find((x) => x.order_id === orderId);
+    if (!c || c[`${kind}_emailed_at`]) return [];
+    const until = c[`${kind}_email_lease_until`];
+    if (until && until > clock) return [];
+    c[`${kind}_email_lease_until`] = clock + Number(secs) * 1000;
+    step(`after-reserve-${kind}`); // committed, then the process dies
+    return [{ order_id: orderId }];
+  }
+  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent from gift_claims/.exec(q);
+  if (sentQ) {
+    const c = claims.find((x) => x.order_id === values[0]);
+    return c ? [{ sent: Boolean(c[`${sentQ[1] as "recipient" | "buyer"}_emailed_at`]) }] : [];
+  }
+  const mark = /^update gift_claims set (recipient|buyer)_emailed_at = now\(\), \w+ = null/.exec(q);
+  if (mark) {
+    const kind = mark[1] as "recipient" | "buyer";
+    step(`mark-${kind}`);
+    const c = claims.find((x) => x.order_id === values[0]);
+    if (c) {
+      c[`${kind}_emailed_at`] = new Date();
+      c[`${kind}_email_lease_until`] = null;
+    }
+    return [];
+  }
+  const release = /^update gift_claims set (recipient|buyer)_email_lease_until = null/.exec(q);
+  if (release) {
+    const kind = release[1] as "recipient" | "buyer";
+    const c = claims.find((x) => x.order_id === values[0]);
+    if (c && !c[`${kind}_emailed_at`]) c[`${kind}_email_lease_until`] = null;
+    return [];
   }
   throw new Error(`Unexpected query in test double: ${q}`);
 }
@@ -110,6 +142,7 @@ vi.mock("~/lib/gift-email", async () => {
   return { ...actual, ...mail };
 });
 
+import { GIFT_EMAIL_LEASE_SECONDS } from "~/lib/gifts";
 import { handleStripeWebhook } from "~/routes/api/stripe-webhook";
 
 function delivery(id = "evt_gift_1", type = "checkout.session.completed"): Request {
@@ -169,13 +202,21 @@ beforeEach(() => {
   events = new Set();
   claims = [];
   crashAt = null;
-  mail.sendGiftEmail.mockReset().mockResolvedValue(true);
-  mail.sendGiftBuyerEmail.mockReset().mockResolvedValue(true);
+  clock = 1_000_000;
+  vi.stubEnv("RESEND_API_KEY", "re_test");
+  vi.stubEnv("GIFT_FROM_EMAIL", "gifts@example.com");
+  mail.sendGiftEmail.mockReset().mockResolvedValue("sent");
+  mail.sendGiftBuyerEmail.mockReset().mockResolvedValue("sent");
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 
 describe("gift webhook: crash after payment is recorded, then Stripe retries", () => {
-  test.each(["after-markPaid", "mint", "reserve-recipient", "reserve-buyer"])(
+  test.each([
+    "after-markPaid",
+    "mint",
+    "reserve-recipient",
+    "reserve-buyer",
+  ])(
     "crash at %s → retry completes the claim link and sends each email exactly once",
     async (where) => {
       crashAt = where;
@@ -234,15 +275,72 @@ describe("gift webhook: crash after payment is recorded, then Stripe retries", (
     expect(claims).toHaveLength(1);
   });
 
-  test("a send that throws releases the flag; the next delivery retries that email only", async () => {
+  test("a failed send releases the lease and answers 500; the retry sends that email only", async () => {
     mail.sendGiftEmail.mockRejectedValueOnce(new Error("resend 503"));
     const first = await handleStripeWebhook(delivery());
-    expect(first.status).toBe(200); // email is best-effort; link exists
+    expect(first.status).toBe(500); // Stripe will retry
     expect(claims[0].recipient_emailed_at).toBeNull();
+    expect(claims[0].recipient_email_lease_until).toBeNull(); // released at once
     expect(claims[0].buyer_emailed_at).toBeInstanceOf(Date);
 
-    await handleStripeWebhook(delivery("evt_again"));
+    const retry = await handleStripeWebhook(delivery());
+    expect(retry.status).toBe(200);
     expect(mail.sendGiftEmail).toHaveBeenCalledTimes(2);
     expect(mail.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
+    expect(claims[0].recipient_emailed_at).toBeInstanceOf(Date);
+  });
+
+  test("a 'failed' result (Resend 5xx/429) is retried the same way", async () => {
+    mail.sendGiftBuyerEmail.mockResolvedValueOnce("failed");
+    const responses = await deliverUntil2xx(() => delivery());
+    expect(responses.map((r) => r.status)).toEqual([500, 200]);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(1);
+    expect(mail.sendGiftBuyerEmail).toHaveBeenCalledTimes(2);
+  });
+
+  test("crash AFTER the reservation, before sending: the email is not lost", async () => {
+    crashAt = "after-reserve-recipient";
+    const first = await handleStripeWebhook(delivery());
+    expect(first.status).toBe(500);
+    expect(claims[0].recipient_email_lease_until).not.toBeNull(); // orphaned lease
+    expect(claims[0].recipient_emailed_at).toBeNull(); // never marked sent
+    expect(mail.sendGiftEmail).not.toHaveBeenCalled();
+
+    // A retry inside the lease window does not double-send; it asks Stripe to come back.
+    const early = await handleStripeWebhook(delivery());
+    expect(early.status).toBe(500);
+    expect(mail.sendGiftEmail).not.toHaveBeenCalled();
+
+    // Lease expired: the next retry sends it, exactly once.
+    clock += GIFT_EMAIL_LEASE_SECONDS * 1000 + 1;
+    const late = await handleStripeWebhook(delivery());
+    expect(late.status).toBe(200);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(1);
+    expect(mail.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
+    expect(claims[0].recipient_emailed_at).toBeInstanceOf(Date);
+
+    await handleStripeWebhook(delivery("evt_later"));
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test("crash after Resend accepted but before it was recorded: resent with the SAME idempotency key", async () => {
+    crashAt = "mark-recipient";
+    expect((await handleStripeWebhook(delivery())).status).toBe(500);
+    clock += GIFT_EMAIL_LEASE_SECONDS * 1000 + 1;
+    expect((await handleStripeWebhook(delivery())).status).toBe(200);
+    const keys = mail.sendGiftEmail.mock.calls.map((c) => c[0].idempotencyKey);
+    expect(keys).toEqual([`gift-recipient-${ORDER}`, `gift-recipient-${ORDER}`]);
+    // Resend de-duplicates on that key; we record it and never send again.
+    await handleStripeWebhook(delivery("evt_more"));
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(2);
+  });
+
+  test("email not configured: claim minted, nothing reserved, 200", async () => {
+    vi.stubEnv("RESEND_API_KEY", "");
+    const res = await handleStripeWebhook(delivery());
+    expect(res.status).toBe(200);
+    expect(claims).toHaveLength(1);
+    expect(claims[0].recipient_email_lease_until).toBeNull();
+    expect(mail.sendGiftEmail).not.toHaveBeenCalled();
   });
 });

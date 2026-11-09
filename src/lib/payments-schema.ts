@@ -51,7 +51,21 @@ export const REQUIRED_PAYMENTS_SCHEMA: Record<string, string[]> = {
 export const PAYMENTS_SCHEMA_REQUIREMENTS: {
   migration: string;
   schema: Record<string, string[]>;
-}[] = [{ migration: PAYMENTS_MIGRATION, schema: REQUIRED_PAYMENTS_SCHEMA }];
+}[] = [
+  { migration: PAYMENTS_MIGRATION, schema: REQUIRED_PAYMENTS_SCHEMA },
+  // #32: gift email bookkeeping (sent flags + send leases).
+  {
+    migration: "migrations/0005_gift_claim_email_flags.sql",
+    schema: {
+      gift_claims: [
+        "recipient_emailed_at",
+        "buyer_emailed_at",
+        "recipient_email_lease_until",
+        "buyer_email_lease_until",
+      ],
+    },
+  },
+];
 
 /** Pure diff, separated for testing. Returns "table" or "table.column" entries. */
 export function missingSchema(
@@ -91,11 +105,9 @@ export function evaluatePaymentsSchema(
   const missing: string[] = [];
   const migrations: string[] = [];
   for (const req of requirements) {
-    const gaps = missingSchema(present, req.schema).filter(
-      (g) => !missing.includes(g),
-    );
+    const gaps = missingSchema(present, req.schema);
     if (gaps.length === 0) continue;
-    missing.push(...gaps);
+    for (const g of gaps) if (!missing.includes(g)) missing.push(g);
     if (!migrations.includes(req.migration)) migrations.push(req.migration);
   }
   return { ok: missing.length === 0, missing, migrations };
