@@ -11,7 +11,7 @@
  * or refund; nothing is refunded automatically. So the webhook never silently
  * drops such a payment: it records it here (idempotent on the session id) and
  * logs an ORPHAN_PAYMENT line. If the write fails (including the table not
- * existing yet: it comes from migrations/0004_order_access_and_orphans.sql),
+ * existing yet: it comes from migrations/0004_payments_schema.sql),
  * the webhook answers 500 so Stripe retries until the record lands.
  *
  * Support query:  select * from orphan_payments order by created_at desc;

@@ -1,8 +1,9 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   navigateCheckout,
   openCheckoutTab,
   resolveEntitlementFromOrders,
+  runCheckout,
 } from "../entitlement";
 
 describe("resolveEntitlementFromOrders", () => {
@@ -130,5 +131,57 @@ describe("navigateCheckout", () => {
 
     expect(result).toBe("none");
     expect(assignCalls).toEqual([]);
+  });
+});
+
+describe("runCheckout (issue #22: open the tab inside the click gesture)", () => {
+  function deps(order: string[], response: Response | Error) {
+    const tab = { location: { href: "" }, close: vi.fn(), opener: {} as unknown };
+    return {
+      tab,
+      deps: {
+        open: vi.fn(() => {
+          order.push("open");
+          return tab;
+        }),
+        fetch: vi.fn(async () => {
+          order.push("fetch");
+          if (response instanceof Error) throw response;
+          return response;
+        }),
+        assignCurrentTab: vi.fn(),
+      },
+    };
+  }
+
+  test("opens the tab synchronously, before the /api/checkout request starts", async () => {
+    const order: string[] = [];
+    const { tab, deps: d } = deps(
+      order,
+      new Response(
+        JSON.stringify({ orderId: "o1", accessToken: "t", url: "https://buy.stripe.com/test_x" }),
+      ),
+    );
+    const pending = runCheckout("singleInsight", undefined, d);
+    // Still inside the synchronous part of the click handler: the tab must
+    // already be open, and nothing may have been awaited yet.
+    expect(d.open).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("open");
+    const result = await pending;
+    expect(order).toEqual(["open", "fetch"]);
+    expect(result).toEqual({ ok: true, orderId: "o1", accessToken: "t" });
+    expect(tab.location.href).toBe("https://buy.stripe.com/test_x");
+    expect(tab.opener).toBeNull();
+    expect(d.assignCurrentTab).not.toHaveBeenCalled();
+  });
+
+  test("closes the pre-opened tab when checkout fails", async () => {
+    for (const response of [new Response("{}", { status: 503 }), new Error("network")]) {
+      const order: string[] = [];
+      const { tab, deps: d } = deps(order, response);
+      expect(await runCheckout("singleInsight", undefined, d)).toEqual({ ok: false });
+      expect(order).toEqual(["open", "fetch"]);
+      expect(tab.close).toHaveBeenCalledTimes(1);
+    }
   });
 });

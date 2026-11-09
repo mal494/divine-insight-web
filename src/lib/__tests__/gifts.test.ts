@@ -98,7 +98,7 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
 }
 
 vi.mock("~/db", () => ({ sql: () => query }));
-vi.mock("~/lib/orders", () => ({ ensureSchema: async () => {} }));
+vi.mock("~/lib/orders", () => ({}));
 
 import {
   claimGift,

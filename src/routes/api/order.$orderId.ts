@@ -26,7 +26,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { claimUrlFor } from "~/lib/gift-email";
 import { getClaimForPaidGift } from "~/lib/gifts";
-import { checkOrderAccess, orderTokenFrom } from "~/lib/order-access";
+import {
+  checkOrderAccess,
+  isMissingSchemaError,
+  orderTokenFrom,
+  schemaNotMigratedResponse,
+} from "~/lib/order-access";
 import { getOrder, listReadings } from "~/lib/orders";
 
 export const Route = createFileRoute("/api/order/$orderId")({
@@ -48,6 +53,8 @@ export async function handleOrderGet(
     if (access === "denied") return json({ error: "not_found" }, 404);
     order = await getOrder(orderId);
   } catch (err) {
+    if (isMissingSchemaError(err))
+      return schemaNotMigratedResponse("GET /api/order", err);
     console.error("order lookup failed", err);
     return json({ error: "unavailable" }, 503);
   }

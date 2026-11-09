@@ -9,7 +9,7 @@
  *
  * Now /api/checkout also mints a per-order access token: 32 random bytes,
  * base64url. Only its SHA-256 hash is stored (orders.access_token_hash, added
- * by migrations/0004_order_access_and_orphans.sql), and the token itself never
+ * by migrations/0004_payments_schema.sql), and the token itself never
  * goes to Stripe. The buyer's browser keeps it next to the order id and sends
  * it as the `x-order-token` header to GET /api/order/:id and POST /api/reading.
  *
@@ -28,8 +28,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { sql } from "~/db";
 
 export const ORDER_TOKEN_HEADER = "x-order-token";
-export const ORDER_ACCESS_MIGRATION =
-  "migrations/0004_order_access_and_orphans.sql";
+export const ORDER_ACCESS_MIGRATION = "migrations/0004_payments_schema.sql";
 
 /** "granted": token matches. "legacy": pre-token order, id is enough. "denied": anything else. */
 export type OrderAccess = "granted" | "legacy" | "denied";
@@ -43,10 +42,29 @@ export class OrderSchemaMissingError extends Error {
   }
 }
 
-/** Postgres undefined_column / undefined_table. */
+/** Postgres undefined_column / undefined_table, raw or wrapped. */
 export function isMissingSchemaError(err: unknown): boolean {
+  if (err instanceof OrderSchemaMissingError) return true;
   const code = (err as { code?: unknown } | null)?.code;
   return code === "42703" || code === "42P01";
+}
+
+/** The 503 every one-time route gives when migration 0004 is missing. */
+export function schemaNotMigratedResponse(
+  route: string,
+  err: unknown,
+): Response {
+  console.error(
+    `${route}: payments schema missing, apply ${ORDER_ACCESS_MIGRATION}`,
+    err,
+  );
+  return new Response(JSON.stringify({ error: "schema_not_migrated" }), {
+    status: 503,
+    headers: {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+    },
+  });
 }
 
 export function hashOrderToken(token: string): string {
@@ -68,9 +86,46 @@ export function orderTokenFrom(request: Request): string | null {
 }
 
 /**
+ * Strict ISO 8601 date-time with an explicit zone: `YYYY-MM-DDTHH:MM[:SS[.fff]]`
+ * followed by `Z` or `±HH:MM`. Date-only or zone-less values are rejected
+ * because they would be read in whatever timezone the server happens to use.
+ */
+const STRICT_ISO_WITH_ZONE =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(Z|[+-](\d{2}):(\d{2}))$/;
+
+/** Parse LEGACY_ORDER_ACCESS_UNTIL; null if it is not strict ISO 8601 with a zone. */
+export function parseStrictIsoInstant(raw: string): number | null {
+  const m = STRICT_ISO_WITH_ZONE.exec(raw);
+  if (!m) return null;
+  const [, , mo, d, h, mi, sec, zone, zh, zm] = m;
+  const inRange =
+    +mo >= 1 &&
+    +mo <= 12 &&
+    +d >= 1 &&
+    +d <= 31 &&
+    +h <= 23 &&
+    +mi <= 59 &&
+    (sec === undefined || +sec <= 59) &&
+    (zone === "Z" || (+zh <= 23 && +zm <= 59));
+  if (!inRange) return null;
+  const t = Date.parse(raw);
+  if (Number.isNaN(t)) return null;
+  // Reject calendar overflow such as 2027-02-31 (Date.parse would roll over).
+  const shifted = new Date(
+    t +
+      (zone === "Z"
+        ? 0
+        : (zone[0] === "-" ? -1 : 1) * (+zh * 60 + +zm) * 60_000),
+  );
+  if (shifted.getUTCDate() !== +d) return null;
+  return t;
+}
+
+/**
  * Whether id-only access for pre-token orders is still allowed.
- * Unset/blank → open (default). Valid date in the future → open. Past → closed.
- * Unparseable → closed (fail closed on a typo).
+ * Unset/blank → open (default). Strict ISO 8601 instant with a zone in the
+ * future → open; now or past → closed. Anything else (date-only, no zone,
+ * garbage) → closed with a warning (fail closed on a typo).
  */
 export function legacyAccessOpen(
   env: Record<string, string | undefined> = process.env,
@@ -78,10 +133,10 @@ export function legacyAccessOpen(
 ): boolean {
   const raw = env.LEGACY_ORDER_ACCESS_UNTIL?.trim();
   if (!raw) return true;
-  const until = Date.parse(raw);
-  if (Number.isNaN(until)) {
-    console.error(
-      "LEGACY_ORDER_ACCESS_UNTIL is not a valid date; legacy order access closed",
+  const until = parseStrictIsoInstant(raw);
+  if (until === null) {
+    console.warn(
+      "LEGACY_ORDER_ACCESS_UNTIL must be ISO 8601 with a timezone (e.g. 2027-01-31T00:00:00Z); treating it as invalid, legacy order access closed",
     );
     return false;
   }

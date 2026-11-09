@@ -129,9 +129,11 @@ has no order or recipient; it is recorded in `orphan_payments` for support.
 **A webhook endpoint in Stripe**
 
 - URL: `https://<your site>/api/stripe-webhook`
-- Events:
+- Events (all three are required):
   - `checkout.session.completed`
-  - `checkout.session.async_payment_succeeded`
+  - `checkout.session.async_payment_succeeded` (fulfilled exactly like `completed` once paid)
+  - `checkout.session.async_payment_failed` (moves the pending order to `failed`;
+    never grants credits or creates a gift link; idempotent; always 2xx)
 
 **Payment links (per environment)**
 
@@ -214,25 +216,25 @@ These tests mock `~/db`. They do not boot the dev server or hit `/api/stripe-web
 
 ## Database
 
-Four tables, created on first use (this template has no migration runner, so
-the schema bootstraps itself):
+The one-time payments schema comes **only** from
+`migrations/0004_payments_schema.sql` (no request runs DDL any more):
 
-- `orders` - one row per checkout attempt, with status and remaining credits
+- `orders` - one row per checkout attempt, with status (`pending`, `paid`,
+  `failed`) and remaining credits; `access_token_hash` is the SHA-256 of the
+  per-order access token
 - `readings` - every stored reading, keyed to its order (this is the journal)
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
+- `orphan_payments` - paid Stripe sessions the webhook could not fulfil (see above)
 
-Two later additions are **not** self-created; they come from
-`migrations/0004_order_access_and_orphans.sql`, which must be applied (with the
-unpooled URL) **before** deploying the code that uses them:
+Apply it (with the unpooled URL) **before** deploying code that needs it. On
+Vercel, merging to `main` deploys production, so for production that means
+before merging. It is idempotent and safe to run while older code is live.
 
-- `orders.access_token_hash` - SHA-256 of the per-order access token
-- `orphan_payments` - paid Stripe sessions the webhook could not fulfil (see below)
-
-Without 0004 the code fails closed: checkout and the order/reading endpoints
-answer 503, and the webhook answers 500 for unfulfillable sessions so Stripe
-retries. The self-created tables are bootstrapped at most once per server
-process (no DDL on every request).
+Without it the code fails closed: checkout, order, reading and claim answer
+503 (`schema_not_migrated` where detectable), the webhook answers 5xx so Stripe
+retries, and `GET /api/health/payments` returns 503 listing what is missing
+(200 `{ ok: true }` when ready; read-only, no DDL).
 
 ## Divine Insight Pro
 

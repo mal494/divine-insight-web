@@ -32,10 +32,9 @@ vi.mock("~/db", () => ({
     () =>
     async (strings: TemplateStringsArray, ...v: unknown[]) => {
       const q = strings.join(" ").replace(/\s+/g, " ").trim().toLowerCase();
-      if (q.startsWith("alter") && q.includes("access_token_hash")) {
-        throw new Error("runtime DDL for access_token_hash must not happen");
+      if (/^(create|alter|drop)\b/.test(q)) {
+        throw new Error(`runtime DDL is not allowed: ${q}`);
       }
-      if (q.startsWith("create") || q.startsWith("alter")) return [];
       if (db.noAccessColumn && q.includes("access_token_hash")) {
         throw Object.assign(
           new Error('column "access_token_hash" does not exist'),

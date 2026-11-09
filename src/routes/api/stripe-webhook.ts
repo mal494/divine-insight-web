@@ -13,21 +13,25 @@
  *
  * Always answer 200 once the signature is good, even when we decide not to
  * fulfil — a non-2xx makes Stripe retry for days over something a retry will
- * never fix. Refusals are logged instead. The one exception is a paid gift
- * whose claim token could not be minted (a transient database error): that
- * answers 500 so Stripe retries until the gift has a claim path.
+ * never fix. Refusals are logged instead. The exception is a paid gift whose
+ * delivery bookkeeping hit a database error (claim token not minted, or the
+ * emailed-at reservation failed): that answers 500 so Stripe retries, and the
+ * retry, which markPaid reports as "duplicate" or "already-paid", re-runs
+ * the idempotent gift steps until the claim link exists and each email has
+ * gone out once.
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { claimUrlFor, sendGiftBuyerEmail, sendGiftEmail } from "~/lib/gift-email";
 import {
   GIFT_EMAIL_MIGRATION,
   GiftSchemaMissingError,
+  type GiftEmailKind,
   createGiftClaim,
   getGiftDetails,
   releaseGiftEmail,
   reserveGiftEmail,
 } from "~/lib/gifts";
-import { markPaid } from "~/lib/orders";
+import { markPaid, markPaymentFailed } from "~/lib/orders";
 import { recordOrphanPayment, type OrphanReason } from "~/lib/orphan-payments";
 import { verifyStripeSignature } from "~/lib/stripe-signature";
 
@@ -66,6 +70,10 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     return new Response("invalid json", { status: 400 });
   }
 
+  if (event.type === "checkout.session.async_payment_failed") {
+    return handleAsyncPaymentFailed(event);
+  }
+
   if (
     event.type !== "checkout.session.completed" &&
     event.type !== "checkout.session.async_payment_succeeded"
@@ -92,11 +100,21 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     console.warn("session not paid:", session.id, session.payment_status);
     return new Response("not paid", { status: 200 });
   }
-  if (typeof session.amount_total !== "number" || !Number.isFinite(session.amount_total)) {
-    console.warn("session missing amount_total:", session.id, session.amount_total);
+  if (
+    typeof session.amount_total !== "number" ||
+    !Number.isFinite(session.amount_total)
+  ) {
+    console.warn(
+      "session missing amount_total:",
+      session.id,
+      session.amount_total,
+    );
     return new Response("invalid amount", { status: 200 });
   }
-  if (typeof session.currency !== "string" || session.currency.trim().length === 0) {
+  if (
+    typeof session.currency !== "string" ||
+    session.currency.trim().length === 0
+  ) {
     console.warn("session missing currency:", session.id, session.currency);
     return new Response("invalid currency", { status: 200 });
   }
@@ -110,7 +128,11 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     currency: session.currency.toLowerCase(),
   });
 
-  if (result !== "applied" && result !== "duplicate" && result !== "already-paid") {
+  if (
+    result !== "applied" &&
+    result !== "duplicate" &&
+    result !== "already-paid"
+  ) {
     console.error("fulfilment refused:", result, orderId, session.id);
     return orphan(event, result, result);
   }
@@ -149,7 +171,12 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
 
     // Each email is reserved (recipient_emailed_at / buyer_emailed_at) before
     // it is sent, so it goes out exactly once whoever minted the token and
-    // however often Stripe delivers. A failed send releases the reservation.
+    // however often Stripe delivers. This block runs on EVERY paid outcome
+    // ("applied", "already-paid", "duplicate"), so if an earlier delivery
+    // crashed after markPaid committed, the Stripe retry finishes the job.
+    // A failed send releases the reservation (best-effort: the buyer always
+    // sees the link). A database error while reserving or releasing answers
+    // 500 so Stripe retries, instead of silently dropping the email.
     if (!claim.token) {
       // Existing hashed token that can no longer be re-derived (secret
       // rotated): the recipient's link still works; support can resend.
@@ -159,35 +186,28 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     const claimUrl = claimUrlFor(claim.token, request.url);
     const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
     try {
-      if (gift.recipientEmail && (await reserveGiftEmail(orderId, "recipient"))) {
-        const sent = await sendGiftEmail({
-          to: gift.recipientEmail,
-          senderName: gift.senderName,
-          note: gift.note,
-          claimUrl,
-        });
-        if (!sent) await releaseGiftEmail(orderId, "recipient");
+      if (gift.recipientEmail) {
+        const to = gift.recipientEmail;
+        await deliverOnce(orderId, "recipient", () =>
+          sendGiftEmail({ to, senderName: gift.senderName, note: gift.note, claimUrl }),
+        );
       }
       if (!buyerEmail) {
         if (claim.created) console.warn("paid gift has no buyer email for receipt", { orderId });
-      } else if (await reserveGiftEmail(orderId, "buyer")) {
-        const sent = await sendGiftBuyerEmail({
-          to: buyerEmail,
-          recipientEmail: gift.recipientEmail,
-          claimUrl,
-        });
-        if (!sent) await releaseGiftEmail(orderId, "buyer");
+      } else {
+        await deliverOnce(orderId, "buyer", () =>
+          sendGiftBuyerEmail({ to: buyerEmail, recipientEmail: gift.recipientEmail, claimUrl }),
+        );
       }
     } catch (err) {
       if (err instanceof GiftSchemaMissingError) {
         // Fail closed like the order-access schema: Stripe retries until the
         // migration is applied. The claim token already exists.
         console.error("gift email flags missing — apply", GIFT_EMAIL_MIGRATION, { orderId });
-        return new Response("gift delivery pending", { status: 500 });
+      } else {
+        console.error("gift email bookkeeping failed for order", orderId, err);
       }
-      // Email is best-effort; the claim link already exists and the buyer
-      // sees it on the confirmation view.
-      console.error("gift email failed for order", orderId, err);
+      return new Response("gift delivery pending", { status: 500 });
     }
   }
 
@@ -195,11 +215,61 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
 }
 
 /**
+ * Send one gift email at most once per (order, kind). Reservation errors
+ * propagate (the caller answers 500 → Stripe retries); a send that fails or
+ * throws releases the reservation so a later delivery may try again.
+ */
+async function deliverOnce(
+  orderId: string,
+  kind: GiftEmailKind,
+  send: () => Promise<boolean>,
+): Promise<void> {
+  if (!(await reserveGiftEmail(orderId, kind))) return;
+  let sent = false;
+  try {
+    sent = await send();
+  } catch (err) {
+    console.error("gift email send threw for order", orderId, kind, err);
+  }
+  if (!sent) await releaseGiftEmail(orderId, kind);
+}
+
+/**
+ * A delayed payment (bank debit etc.) failed. The order was never paid, so
+ * there is nothing to revoke: move it from pending to failed so the buyer's
+ * page stops waiting, and never grant credits or mint a gift link. Idempotent;
+ * always 2xx (a retry cannot change the outcome).
+ */
+async function handleAsyncPaymentFailed(event: StripeEvent): Promise<Response> {
+  const session = event.data?.object ?? {};
+  const orderId = session.client_reference_id;
+  if (!orderId) return new Response("no order reference", { status: 200 });
+  const result = await markPaymentFailed({
+    eventId: event.id,
+    orderId,
+    sessionId: session.id ?? null,
+  });
+  if (result !== "failed") {
+    console.warn(
+      "async payment failed, order not updated:",
+      result,
+      orderId,
+      session.id,
+    );
+  }
+  return new Response(`payment-failed:${result}`, { status: 200 });
+}
+
+/**
  * Paid but unfulfillable: persist it for manual reissue/refund. 200 once
  * recorded (a retry can never fix it); 500 if the record could not be written,
  * so Stripe retries until it is.
  */
-async function orphan(event: StripeEvent, reason: OrphanReason, body: string): Promise<Response> {
+async function orphan(
+  event: StripeEvent,
+  reason: OrphanReason,
+  body: string,
+): Promise<Response> {
   const s = event.data?.object ?? {};
   try {
     await recordOrphanPayment({
