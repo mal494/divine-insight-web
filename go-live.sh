@@ -1,49 +1,89 @@
 #!/usr/bin/env bash
-# Publish this site live to Vercel and print the live URL.
+# Publish this site to Vercel PRODUCTION (or a preview) from a prebuilt bundle.
 #
-# Contract:
-#   VERCEL_TOKEN   (required) — collected from the owner via the go-live flow.
-#   DATABASE_URL   (optional) — passed as a runtime env var when the site uses a DB.
-#   STRIPE_WEBHOOK_SECRET (required for paid fulfilment) — Stripe webhook signing secret.
-#   RESEND_API_KEY (required for gift delivery) — Resend API key.
-#   GIFT_FROM_EMAIL (required for gift delivery) — verified sender email for gift messages.
-#   PUBLIC_SITE_URL (optional) — used in gift claim links when set.
-#   VERCEL_SCOPE   (optional) — team slug; auto-resolved from the token if unset.
-#   VERCEL_TEAM_ID (optional) — team id; auto-resolved from the token if unset.
+# Hardened (QA round 4). What changed and why:
+#   * Production deploys use `--prod`. Before, the deploy went out as a preview
+#     and was never promoted.
+#   * Deployment protection is no longer switched off project-wide. Previews
+#     share the production database, so they must stay behind Vercel
+#     Authentication. The script only READS the setting. Opt in with
+#     GO_LIVE_SET_STANDARD_PROTECTION=1 to set "Standard Protection"
+#     (production domains public, previews and deployment URLs protected).
+#   * No secret is ever passed on a command line (visible in `ps` and in CI
+#     logs). The CLI reads VERCEL_TOKEN from the environment, runtime secrets
+#     live in the Vercel project's env and are only *checked* here, and
+#     GO_LIVE_SYNC_ENV=1 uploads them through stdin (`vercel env add`).
+#   * The Vercel CLI version is pinned (VERCEL_CLI_VERSION), not @latest.
+#   * The database schema is part of the contract. A production deploy refuses
+#     to run until you either apply named migrations through the explicit
+#     opt-in step (GO_LIVE_MIGRATIONS=...) or confirm you already applied
+#     them (GO_LIVE_SCHEMA_CONFIRMED=1). Afterwards it reads
+#     /api/health/payments when that route exists.
 #
-# Scope + team id are auto-resolved from the token (personal tokens have neither;
-# team tokens report their default team), so the owner only ever pastes the token.
-# Making the project public drops the org SSO protection new projects inherit,
-# which would otherwise put a login wall in front of a site meant for the public.
+# Nothing here runs automatically: `bun run go-live` is a manual, owner-only
+# step. With the GitHub integration, merging to main already deploys
+# production, so this script is the fallback path, not the normal one.
+#
+# Inputs (environment only; never arguments):
+#   VERCEL_TOKEN            required. Read by the CLI from the environment.
+#   GO_LIVE_TARGET          "production" (default) or "preview".
+#   GO_LIVE_ENV_FILE        optional KEY=VALUE file (not sourced/executed) to
+#                           load the variables below from, e.g. a chmod 600 file
+#                           outside the repo.
+#   GO_LIVE_SYNC_ENV=1      upload the runtime vars present in this shell to the
+#                           project's env for the target, via stdin.
+#   GO_LIVE_MIGRATIONS      opt-in: space-separated file names in migrations/
+#                           to apply, in that order, with psql. Needs
+#                           DATABASE_URL_UNPOOLED and a typed confirmation.
+#   GO_LIVE_SCHEMA_CONFIRMED=1  you already applied the migrations this code
+#                           needs (see PAYMENTS.md / the PR notes).
+#   GO_LIVE_SET_STANDARD_PROTECTION=1  opt-in, see above.
+#   VERCEL_SCOPE / VERCEL_TEAM_ID / VERCEL_PROJECT_NAME  optional overrides.
+#
+# Runtime vars the deployment needs (checked in the project's env for the
+# target; uploaded only with GO_LIVE_SYNC_ENV=1):
+#   DATABASE_URL, STRIPE_WEBHOOK_SECRET, RESEND_API_KEY, GIFT_FROM_EMAIL
+#   (PUBLIC_SITE_URL optional).
 set -euo pipefail
 cd "$(dirname "$0")"
 umask 002
 
-: "${VERCEL_TOKEN:?set VERCEL_TOKEN (collect it from the owner first)}"
-REQUIRED_PAYMENT_VARS=(
-  STRIPE_WEBHOOK_SECRET
-  RESEND_API_KEY
-  GIFT_FROM_EMAIL
-)
-MISSING_PAYMENT_VARS=()
-for var_name in "${REQUIRED_PAYMENT_VARS[@]}"; do
-  if [ -z "${!var_name:-}" ]; then
-    MISSING_PAYMENT_VARS+=("$var_name")
-  fi
-done
-if [ "${#MISSING_PAYMENT_VARS[@]}" -gt 0 ]; then
-  echo "error: missing required payment env vars: ${MISSING_PAYMENT_VARS[*]}" >&2
-  echo "set these before running go-live so Stripe webhooks and gift emails work in production" >&2
-  exit 1
+VERCEL_CLI_VERSION="65.12.1"
+VERCEL=(bunx "vercel@${VERCEL_CLI_VERSION}")
+REQUIRED_RUNTIME_VARS=(DATABASE_URL STRIPE_WEBHOOK_SECRET RESEND_API_KEY GIFT_FROM_EMAIL)
+OPTIONAL_RUNTIME_VARS=(PUBLIC_SITE_URL)
+
+die() { echo "error: $*" >&2; exit 1; }
+
+# --- inputs -----------------------------------------------------------------
+if [ -n "${GO_LIVE_ENV_FILE:-}" ]; then
+  [ -f "$GO_LIVE_ENV_FILE" ] || die "GO_LIVE_ENV_FILE not found: $GO_LIVE_ENV_FILE"
+  # Parse, never source: the file is data, not code.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "bad line in GO_LIVE_ENV_FILE (key: ${key:0:40})"
+    val="${val%\"}"; val="${val#\"}"
+    export "$key=$val"
+  done < "$GO_LIVE_ENV_FILE"
 fi
 
-PROJECT_NAME="${VERCEL_PROJECT_NAME:-$(basename "$(pwd)")}"
-VERCEL="bunx vercel@latest"
+: "${VERCEL_TOKEN:?set VERCEL_TOKEN in the environment (never pass it as an argument)}"
+export VERCEL_TOKEN
 
-# Resolve the token's team (slug for --scope, id for the make-public API call).
-# Empty for a personal-account token. bun is always present in the sandbox.
+TARGET="${GO_LIVE_TARGET:-production}"
+case "$TARGET" in
+  production) TARGET_ARGS=(--prod) ;;
+  preview) TARGET_ARGS=() ;;
+  *) die "GO_LIVE_TARGET must be production or preview (got: $TARGET)" ;;
+esac
+
+PROJECT_NAME="${VERCEL_PROJECT_NAME:-$(basename "$(pwd)")}"
+
+# --- team / scope (token stays in the environment) ---------------------------
 if [ -z "${VERCEL_SCOPE:-}" ] || [ -z "${VERCEL_TEAM_ID:-}" ]; then
-  RESOLVED="$(VERCEL_TOKEN="$VERCEL_TOKEN" bun -e '
+  RESOLVED="$(bun -e '
     const h = { headers: { Authorization: "Bearer " + process.env.VERCEL_TOKEN } };
     const [u, tj] = await Promise.all([
       fetch("https://api.vercel.com/v2/user", h).then((r) => r.json()).catch(() => ({})),
@@ -57,41 +97,128 @@ if [ -z "${VERCEL_SCOPE:-}" ] || [ -z "${VERCEL_TEAM_ID:-}" ]; then
   VERCEL_TEAM_ID="${VERCEL_TEAM_ID:-${RESOLVED%% *}}"
   [ "$RESOLVED" != "${RESOLVED#* }" ] && VERCEL_SCOPE="${VERCEL_SCOPE:-${RESOLVED##* }}"
 fi
-
-echo "==> building Vercel bundle"
-bash ./build-vercel.sh
-
 SCOPE_ARGS=()
 if [ -n "${VERCEL_SCOPE:-}" ]; then SCOPE_ARGS=(--scope "$VERCEL_SCOPE"); fi
-ENV_ARGS=()
-if [ -n "${DATABASE_URL:-}" ]; then ENV_ARGS=(-e "DATABASE_URL=$DATABASE_URL"); fi
-ENV_ARGS+=(
-  -e "STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET"
-  -e "RESEND_API_KEY=$RESEND_API_KEY"
-  -e "GIFT_FROM_EMAIL=$GIFT_FROM_EMAIL"
-)
-if [ -n "${PUBLIC_SITE_URL:-}" ]; then ENV_ARGS+=(-e "PUBLIC_SITE_URL=$PUBLIC_SITE_URL"); fi
+TEAM_QS=""
+if [ -n "${VERCEL_TEAM_ID:-}" ]; then TEAM_QS="?teamId=$VERCEL_TEAM_ID"; fi
 
-echo "==> deploying${VERCEL_SCOPE:+ (scope: $VERCEL_SCOPE)}"
-DEPLOY_OUT="$($VERCEL deploy --prebuilt --yes --token "$VERCEL_TOKEN" \
-  --name "$PROJECT_NAME" "${SCOPE_ARGS[@]}" "${ENV_ARGS[@]}" 2>&1)" || {
+# Vercel REST call with the token in a curl config on stdin, not in argv.
+vercel_api() {
+  local method="$1" path="$2" body="${3:-}"
+  local args=(-sf -X "$method" "https://api.vercel.com${path}${TEAM_QS}" -K -)
+  if [ -n "$body" ]; then args+=(-H "Content-Type: application/json" --data-binary "$body"); fi
+  printf 'header = "Authorization: Bearer %s"\n' "$VERCEL_TOKEN" | curl "${args[@]}"
+}
+
+# Link this directory to the project so `vercel env` works (writes only
+# .vercel/project.json locally).
+"${VERCEL[@]}" link --yes --project "$PROJECT_NAME" "${SCOPE_ARGS[@]}" >/dev/null
+
+# --- 1. runtime env: upload (opt-in, via stdin) or check ----------------------
+if [ "${GO_LIVE_SYNC_ENV:-}" = "1" ]; then
+  echo "==> uploading runtime env vars to the $TARGET environment (via stdin)"
+  for name in "${REQUIRED_RUNTIME_VARS[@]}" "${OPTIONAL_RUNTIME_VARS[@]}"; do
+    [ -n "${!name:-}" ] || continue
+    printf '%s' "${!name}" |
+      "${VERCEL[@]}" env add "$name" "$TARGET" --force --yes "${SCOPE_ARGS[@]}" >/dev/null
+    echo "    $name"
+  done
+fi
+
+echo "==> checking the project's $TARGET env vars (names only)"
+ENV_NAMES="$("${VERCEL[@]}" env ls "$TARGET" "${SCOPE_ARGS[@]}" 2>/dev/null | awk '{print $1}' || true)"
+MISSING=()
+for name in "${REQUIRED_RUNTIME_VARS[@]}"; do
+  grep -qx "$name" <<<"$ENV_NAMES" || MISSING+=("$name")
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  die "missing $TARGET env vars on the Vercel project: ${MISSING[*]}
+  set them in the dashboard, or rerun with GO_LIVE_SYNC_ENV=1 and the values exported
+  (or in GO_LIVE_ENV_FILE); they are uploaded through stdin, never as arguments"
+fi
+
+# --- 2. database schema: explicit opt-in step or explicit confirmation -------
+if [ -n "${GO_LIVE_MIGRATIONS:-}" ]; then
+  : "${DATABASE_URL_UNPOOLED:?GO_LIVE_MIGRATIONS needs DATABASE_URL_UNPOOLED (the direct, unpooled URL)}"
+  command -v psql >/dev/null || die "psql not found"
+  read -r -a FILES <<<"$GO_LIVE_MIGRATIONS"
+  for f in "${FILES[@]}"; do
+    [[ "$f" =~ ^[0-9]{4}_[a-z0-9_]+\.sql$ ]] || die "not a migration file name: $f"
+    [ -f "migrations/$f" ] || die "missing migrations/$f"
+  done
+  echo "==> about to apply to the database in DATABASE_URL_UNPOOLED, in order:"
+  printf '      migrations/%s\n' "${FILES[@]}"
+  [ -t 0 ] || die "migrations need an interactive terminal for the confirmation"
+  read -r -p "Type 'apply' to continue: " answer
+  [ "$answer" = "apply" ] || die "aborted; nothing applied"
+  # libpq env vars from the URL, so the password is never in psql's argv.
+  # shellcheck disable=SC2016  # JS source, not shell
+  eval "$(DATABASE_URL_UNPOOLED="$DATABASE_URL_UNPOOLED" bun -e '
+    const u = new URL(process.env.DATABASE_URL_UNPOOLED);
+    const q = (s) => "\x27" + String(s).replace(/\x27/g, "\x27\\\x27\x27") + "\x27";
+    const out = {
+      PGHOST: u.hostname, PGPORT: u.port || "5432",
+      PGUSER: decodeURIComponent(u.username), PGPASSWORD: decodeURIComponent(u.password),
+      PGDATABASE: decodeURIComponent(u.pathname.slice(1)),
+      PGSSLMODE: u.searchParams.get("sslmode") || "require",
+    };
+    for (const [k, v] of Object.entries(out)) console.log(`export ${k}=${q(v)}`);
+  ')"
+  for f in "${FILES[@]}"; do
+    echo "==> psql migrations/$f"
+    psql -X -v ON_ERROR_STOP=1 -q -f "migrations/$f"
+  done
+  unset PGPASSWORD
+elif [ "$TARGET" = "production" ] && [ "${GO_LIVE_SCHEMA_CONFIRMED:-}" != "1" ]; then
+  die "production deploy needs the database schema first.
+  Either apply the migrations this code needs through the opt-in step:
+    GO_LIVE_MIGRATIONS=\"0004_payments_schema.sql ...\" DATABASE_URL_UNPOOLED=... bun run go-live
+  or apply them yourself (see PAYMENTS.md) and rerun with GO_LIVE_SCHEMA_CONFIRMED=1"
+fi
+
+# --- 3. build + deploy ---------------------------------------------------------
+echo "==> building Vercel bundle"
+VERCEL_ENV="$TARGET" bash ./build-vercel.sh
+
+echo "==> deploying to $TARGET${VERCEL_SCOPE:+ (scope: $VERCEL_SCOPE)} with vercel@$VERCEL_CLI_VERSION"
+DEPLOY_OUT="$("${VERCEL[@]}" deploy --prebuilt --yes "${TARGET_ARGS[@]}" \
+  "${SCOPE_ARGS[@]}" 2>&1)" || {
   printf '%s\n' "$DEPLOY_OUT" >&2
   exit 1
 }
-LIVE_URL="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9._-]+\.vercel\.app' | tail -1)"
+DEPLOY_URL="$(printf '%s\n' "$DEPLOY_OUT" | grep -oE 'https://[a-zA-Z0-9._-]+\.vercel\.app' | head -1)"
+ALIAS_URL="$(printf '%s\n' "$DEPLOY_OUT" | grep -iE 'alias|production' | grep -oE 'https://[a-zA-Z0-9._-]+' | tail -1 || true)"
+LIVE_URL="${ALIAS_URL:-$DEPLOY_URL}"
+[ -n "$LIVE_URL" ] || { printf '%s\n' "$DEPLOY_OUT" >&2; die "deploy finished but no URL was parsed"; }
 
-if [ -z "$LIVE_URL" ]; then
-  echo "deploy finished but no live URL was parsed — output above" >&2
-  printf '%s\n' "$DEPLOY_OUT" >&2
-  exit 1
+# --- 4. deployment protection: read, never disable --------------------------
+PROJECT_JSON="$(vercel_api GET "/v9/projects/${PROJECT_NAME}" || true)"
+PROTECTION="$(printf '%s' "$PROJECT_JSON" | bun -e '
+  const t = await Bun.stdin.text();
+  try { const p = JSON.parse(t); process.stdout.write(p.ssoProtection ? p.ssoProtection.deploymentType : "none"); }
+  catch { process.stdout.write("unknown"); }' 2>/dev/null || echo unknown)"
+echo "==> deployment protection: $PROTECTION"
+if [ "${GO_LIVE_SET_STANDARD_PROTECTION:-}" = "1" ] && [ "$PROTECTION" != "all_except_custom_domains" ]; then
+  echo "==> setting Standard Protection (production domains public; previews protected)"
+  vercel_api PATCH "/v9/projects/${PROJECT_NAME}" \
+    '{"ssoProtection":{"deploymentType":"all_except_custom_domains"}}' >/dev/null ||
+    echo "warning: could not update deployment protection" >&2
+elif [ "$PROTECTION" = "none" ]; then
+  echo "warning: deployment protection is OFF; previews share the production DB." >&2
+  echo "         Turn on Standard Protection (or rerun with GO_LIVE_SET_STANDARD_PROTECTION=1)." >&2
+elif [ "$PROTECTION" = "all" ]; then
+  echo "note: protection is 'all'; the production domain may show a login wall." >&2
+  echo "      Standard Protection keeps previews private and production public." >&2
 fi
 
-echo "==> making the project public"
-TEAM_QS=""
-if [ -n "${VERCEL_TEAM_ID:-}" ]; then TEAM_QS="?teamId=$VERCEL_TEAM_ID"; fi
-curl -sf -X PATCH "https://api.vercel.com/v9/projects/${PROJECT_NAME}${TEAM_QS}" \
-  -H "Authorization: Bearer $VERCEL_TOKEN" -H "Content-Type: application/json" \
-  -d '{"ssoProtection":null}' >/dev/null ||
-  echo "warning: could not disable SSO protection (site may show a login wall)" >&2
+# --- 5. readiness (read-only) -------------------------------------------------
+HEALTH="$(curl -s -o /dev/null -w '%{http_code}' "$LIVE_URL/api/health/payments" || true)"
+case "$HEALTH" in
+  200) echo "==> payments schema ready" ;;
+  404) echo "note: /api/health/payments not in this build; check the schema manually" >&2 ;;
+  503) echo "WARNING: payments schema NOT migrated: $LIVE_URL/api/health/payments" >&2 ;;
+  401|403) echo "note: health check behind deployment protection (HTTP $HEALTH)" >&2 ;;
+  *) echo "note: health check returned HTTP ${HEALTH:-none}" >&2 ;;
+esac
 
 echo "LIVE: $LIVE_URL"
