@@ -91,6 +91,7 @@ None are required to build or run the dev server. These matter at deploy time:
 | `STRIPE_WEBHOOK_SECRET` | `/api/stripe-webhook` | Stripe signing secret (`whsec_...`). Required for paid orders to flip to `paid` |
 | `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
 | `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
+| `GIFT_TOKEN_SECRET` | gift claim-link HMAC (#33) | Optional but strongly recommended; `go-live.sh` accepts it in `GO_LIVE_ENV_FILE`, uploads it with `GO_LIVE_SYNC_ENV=1`, and warns when it is missing |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `GEMINI_API_KEY` | `/api/gemini/v1beta/models/{model}:{operation}` | Server-only Gemini API key used by the proxy |
 | `GEMINI_PROXY_APP_TOKEN` | Gemini proxy auth gate | Shared app token expected in the `x-divine-app-token` request header |

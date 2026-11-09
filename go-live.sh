@@ -54,7 +54,10 @@
 # Runtime vars the deployment needs (checked in the project's env for the
 # target; uploaded only with GO_LIVE_SYNC_ENV=1):
 #   DATABASE_URL, STRIPE_WEBHOOK_SECRET, RESEND_API_KEY, GIFT_FROM_EMAIL
-#   (PUBLIC_SITE_URL optional).
+#   (PUBLIC_SITE_URL and GIFT_TOKEN_SECRET optional; GIFT_TOKEN_SECRET is
+#   strongly recommended: gift claim links fall back to BETTER_AUTH_SECRET
+#   without it, see .env.example).
+#   Both are accepted in GO_LIVE_ENV_FILE and uploaded by GO_LIVE_SYNC_ENV=1.
 set -euo pipefail
 cd "$(dirname "$0")"
 umask 002
@@ -62,7 +65,7 @@ umask 002
 VERCEL_CLI_VERSION="65.12.1"
 VERCEL=(bunx "vercel@${VERCEL_CLI_VERSION}")
 REQUIRED_RUNTIME_VARS=(DATABASE_URL STRIPE_WEBHOOK_SECRET RESEND_API_KEY GIFT_FROM_EMAIL)
-OPTIONAL_RUNTIME_VARS=(PUBLIC_SITE_URL)
+OPTIONAL_RUNTIME_VARS=(PUBLIC_SITE_URL GIFT_TOKEN_SECRET)
 ENV_FILE_ALLOWLIST=(VERCEL_TOKEN DATABASE_URL_UNPOOLED "${REQUIRED_RUNTIME_VARS[@]}" "${OPTIONAL_RUNTIME_VARS[@]}")
 PG_URL_HELPER="scripts/pg-url.mjs"
 
@@ -177,6 +180,10 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
   die "missing $TARGET env vars on the Vercel project: ${MISSING[*]}
   set them in the dashboard, or rerun with GO_LIVE_SYNC_ENV=1 and the values exported
   (or in GO_LIVE_ENV_FILE); they are uploaded through stdin, never as arguments"
+fi
+if ! grep -qx GIFT_TOKEN_SECRET <<<"$ENV_NAMES"; then
+  echo "    warning: GIFT_TOKEN_SECRET is not set for $TARGET; gift claim links will be" >&2
+  echo "    derived from BETTER_AUTH_SECRET. Set a dedicated secret before the first gift sale." >&2
 fi
 
 # --- 2. database schema: explicit opt-in step or explicit confirmation -------

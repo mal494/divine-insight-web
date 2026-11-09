@@ -139,6 +139,13 @@ echo PASSED`,
     expect(harness(3, 0, { GO_LIVE_EXPECTED_DB_HOST: "ep-x.neon.tech" }).status).toBe(9);
   });
 
+  test("GIFT_TOKEN_SECRET is a runtime var and allowed in the env file", () => {
+    const optional = /OPTIONAL_RUNTIME_VARS=\(([^)]*)\)/.exec(code)![1].split(/\s+/);
+    expect(optional).toContain("GIFT_TOKEN_SECRET");
+    expect(code).toMatch(/ENV_FILE_ALLOWLIST=\([^)]*"\$\{OPTIONAL_RUNTIME_VARS\[@\]\}"/);
+    expect(code).toMatch(/warning: GIFT_TOKEN_SECRET is not set/);
+  });
+
   test("the DB URL is parsed by the strict helper, not ad hoc", () => {
     expect(code).toMatch(/PG_URL="\$DATABASE_URL_UNPOOLED" bun "\$PG_URL_HELPER" libpq-env/);
     expect(code).not.toMatch(/new URL\(process\.env\.DATABASE_URL/);
