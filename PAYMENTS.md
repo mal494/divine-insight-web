@@ -87,6 +87,7 @@ misconfigured site sells nothing rather than giving everything away.
 Without `RESEND_API_KEY` and `GIFT_FROM_EMAIL`, gift orders still complete and
 are still claimable - the emails just never go out, the failure is logged, and
 the buyer can still copy the link from the confirmation view.
+Set both before selling gifts.
 
 Paid gift orders created before every paid gift got a token are backfilled
 with `scripts/backfills/2026-11-gift-claim-tokens.sql` (idempotent, run by
@@ -99,10 +100,10 @@ tag on the page), the analytics loader never runs on a claim path, and no log
 line includes a token. Claiming is one atomic SQL statement (burn + credit +
 reading).
 
-Known gap (separate payments-hardening PR): buying straight from a Stripe
-Payment Link, bypassing `/api/checkout`, has no `client_reference_id`, so the
-webhook has no order or recipient to attach it to.
-Set both before selling gifts.
+The buyer's `claimUrl` is only returned by `/api/order/<id>` past the
+per-order `x-order-token` check, so the order id alone does not reveal it.
+A purchase made straight from a Stripe Payment Link (no `client_reference_id`)
+has no order or recipient; it is recorded in `orphan_payments` for support.
 
 **A webhook endpoint in Stripe**
 

@@ -8,6 +8,12 @@ const mocks = vi.hoisted(() => ({
   getClaimForPaidGift: vi.fn(),
 }));
 
+const access = vi.hoisted(() => ({ checkOrderAccess: vi.fn() }));
+vi.mock("~/lib/order-access", () => ({
+  checkOrderAccess: access.checkOrderAccess,
+  orderTokenFrom: (r: Request) => r.headers.get("x-order-token"),
+}));
+
 vi.mock("~/lib/orders", () => ({
   getOrder: mocks.getOrder,
   listReadings: mocks.listReadings,
@@ -19,7 +25,7 @@ vi.mock("~/lib/gifts", () => ({
 import { ClaimLinkPanel } from "~/components/gift-reading";
 import { buyerText } from "~/lib/gift-email";
 import { resolveEntitlementFromOrders } from "~/lib/entitlement";
-import { handleOrder } from "~/routes/api/order.$orderId";
+import { handleOrderGet } from "~/routes/api/order.$orderId";
 
 const ORDER_ID = "33333333-3333-4333-8333-333333333333";
 const req = () => new Request(`https://divine.example/api/order/${ORDER_ID}`);
@@ -31,6 +37,7 @@ function giftOrder(status: "paid" | "pending", credits = 1) {
 describe("buyer's view of a paid gift", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+  access.checkOrderAccess.mockResolvedValue("granted");
     delete process.env.PUBLIC_SITE_URL;
   });
 
@@ -42,7 +49,7 @@ describe("buyer's view of a paid gift", () => {
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    const res = await handleOrder(ORDER_ID, req());
+    const res = await handleOrderGet(ORDER_ID, req());
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body).toEqual({
@@ -61,18 +68,18 @@ describe("buyer's view of a paid gift", () => {
       token: "b".repeat(32),
       gift: { orderId: ORDER_ID, recipientEmail: "r@example.com", senderName: null, note: null },
     });
-    const body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
+    const body = (await (await handleOrderGet(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body.claimUrl).toBe(`https://divine.example/claim/${"b".repeat(32)}`);
   });
 
   test("unpaid gifts and non-gift orders never expose a claim link", async () => {
     mocks.getOrder.mockResolvedValue(giftOrder("pending"));
-    let body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
+    let body = (await (await handleOrderGet(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body.claimUrl).toBeUndefined();
     expect(mocks.getClaimForPaidGift).not.toHaveBeenCalled();
 
     mocks.getOrder.mockResolvedValue({ ...giftOrder("paid"), sku: "singleInsight", kind: "single" });
-    body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
+    body = (await (await handleOrderGet(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body).toEqual({ status: "paid", kind: "single", credits: 1 });
   });
 
@@ -82,15 +89,28 @@ describe("buyer's view of a paid gift", () => {
       token: null,
       gift: { orderId: ORDER_ID, recipientEmail: null, senderName: null, note: null },
     });
-    const body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
+    const body = (await (await handleOrderGet(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body).toEqual({ status: "paid", kind: "gift", credits: 1 });
+  });
+
+  test("without the order's x-order-token the gift link is NOT returned (404, as for unknown ids)", async () => {
+    access.checkOrderAccess.mockResolvedValue("denied");
+    mocks.getOrder.mockResolvedValue(giftOrder("paid"));
+    mocks.getClaimForPaidGift.mockResolvedValue({
+      token: "e".repeat(32),
+      gift: { orderId: ORDER_ID, recipientEmail: null, senderName: null, note: null },
+    });
+    const res = await handleOrderGet(ORDER_ID, req());
+    expect(res.status).toBe(404);
+    expect(JSON.stringify(await res.json())).not.toContain("e".repeat(32));
+    expect(mocks.getClaimForPaidGift).not.toHaveBeenCalled();
   });
 
   test("a claim lookup failure still answers the order status", async () => {
     mocks.getOrder.mockResolvedValue(giftOrder("paid"));
     mocks.getClaimForPaidGift.mockRejectedValue(new Error("db blip"));
     vi.spyOn(console, "error").mockImplementation(() => {});
-    const res = await handleOrder(ORDER_ID, req());
+    const res = await handleOrderGet(ORDER_ID, req());
     expect(res.status).toBe(200);
     expect(((await res.json()) as Record<string, unknown>).status).toBe("paid");
   });

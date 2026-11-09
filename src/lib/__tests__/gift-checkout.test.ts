@@ -11,6 +11,14 @@ import { validateGiftForm } from "~/components/gift-reading";
 import { isValidRecipientEmail, normalizeRecipientEmail } from "~/lib/gift-validation";
 import { handleCheckout } from "~/routes/api/checkout";
 
+/** Fake TEST-mode links: no live link is ever resolved in tests. */
+const TEST_ENV = {
+  STRIPE_PAYMENT_LINK_SINGLE_INSIGHT: "https://buy.stripe.com/test_single",
+  STRIPE_PAYMENT_LINK_EXTENDED_READING: "https://buy.stripe.com/test_extended",
+  STRIPE_PAYMENT_LINK_READING_BUNDLE: "https://buy.stripe.com/test_bundle",
+  STRIPE_PAYMENT_LINK_GIFT_READING: "https://buy.stripe.com/test_gift",
+};
+
 function post(body: unknown): Request {
   return new Request("https://divine.example/api/checkout", {
     method: "POST",
@@ -59,6 +67,8 @@ describe("recipient email validation", () => {
   });
 });
 
+const checkout = (r: Request) => handleCheckout(r, TEST_ENV);
+
 describe("POST /api/checkout", () => {
   beforeEach(() => {
     vi.resetAllMocks();
@@ -66,7 +76,7 @@ describe("POST /api/checkout", () => {
   });
 
   test("rejects a gift with a missing recipient email before creating an order", async () => {
-    const res = await handleCheckout(post({ sku: "giftReading", senderName: "Me" }));
+    const res = await checkout(post({ sku: "giftReading", senderName: "Me" }));
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "invalid_recipient_email" });
     expect(mocks.createOrder).not.toHaveBeenCalled();
@@ -74,14 +84,14 @@ describe("POST /api/checkout", () => {
 
   test("rejects a gift with an invalid recipient email", async () => {
     for (const recipientEmail of ["", "   ", "nope", "a@b"]) {
-      const res = await handleCheckout(post({ sku: "giftReading", recipientEmail }));
+      const res = await checkout(post({ sku: "giftReading", recipientEmail }));
       expect(res.status).toBe(400);
     }
     expect(mocks.createOrder).not.toHaveBeenCalled();
   });
 
   test("a gift with a valid email checks out as before", async () => {
-    const res = await handleCheckout(
+    const res = await checkout(
       post({
         sku: "giftReading",
         recipientEmail: " friend@example.com ",
@@ -93,18 +103,19 @@ describe("POST /api/checkout", () => {
     const body = (await res.json()) as { orderId: string; url: string };
     expect(body.orderId).toBe("22222222-2222-4222-8222-222222222222");
     expect(new URL(body.url).searchParams.get("client_reference_id")).toBe(body.orderId);
-    expect(mocks.createOrder).toHaveBeenCalledWith("giftReading", {
-      recipientEmail: "friend@example.com",
-      senderName: "Me",
-      note: "Hi",
-    });
+    expect(mocks.createOrder).toHaveBeenCalledWith(
+      "giftReading",
+      { recipientEmail: "friend@example.com", senderName: "Me", note: "Hi" },
+      { accessTokenHash: expect.stringMatching(/^[0-9a-f]{64}$/) },
+    );
+    expect((body as { accessToken?: string }).accessToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 
   test("non-gift SKUs (readings) do not need an email and are unchanged", async () => {
     for (const sku of ["singleInsight", "extendedReading", "readingBundle"]) {
-      const res = await handleCheckout(post({ sku }));
+      const res = await checkout(post({ sku }));
       expect(res.status).toBe(200);
     }
-    expect(mocks.createOrder).toHaveBeenCalledWith("singleInsight", undefined);
+    expect(mocks.createOrder).toHaveBeenCalledWith("singleInsight", undefined, expect.anything());
   });
 });

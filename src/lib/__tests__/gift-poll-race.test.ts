@@ -69,6 +69,12 @@ const mocks = vi.hoisted(() => ({
   sendGiftBuyerEmail: vi.fn(),
 }));
 
+const access = vi.hoisted(() => ({ checkOrderAccess: vi.fn() }));
+vi.mock("~/lib/order-access", () => ({
+  checkOrderAccess: access.checkOrderAccess,
+  orderTokenFrom: (r: Request) => r.headers.get("x-order-token"),
+}));
+
 vi.mock("~/db", () => ({ sql: () => query }));
 vi.mock("~/lib/stripe-signature", () => ({
   verifyStripeSignature: async () => ({ ok: true }),
@@ -92,7 +98,7 @@ vi.mock("~/lib/gift-email", async () => {
 });
 
 import { claimGift } from "~/lib/gifts";
-import { handleOrder } from "~/routes/api/order.$orderId";
+import { handleOrderGet } from "~/routes/api/order.$orderId";
 import { handleStripeWebhook } from "~/routes/api/stripe-webhook";
 
 function webhook(): Request {
@@ -115,10 +121,11 @@ function webhook(): Request {
     }),
   });
 }
-const poll = () => handleOrder(ORDER, new Request(`https://divine.example/api/order/${ORDER}`));
+const poll = () => handleOrderGet(ORDER, new Request(`https://divine.example/api/order/${ORDER}`));
 
 beforeEach(() => {
   vi.resetAllMocks();
+  access.checkOrderAccess.mockResolvedValue("granted");
   process.env.STRIPE_WEBHOOK_SECRET = "whsec_test";
   delete process.env.PUBLIC_SITE_URL;
   order = { id: ORDER, sku: "giftReading", status: "pending", credits: 1, recipient_email: "friend@example.com" };
