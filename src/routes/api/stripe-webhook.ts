@@ -19,6 +19,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { claimUrlFor, sendGiftEmail } from "~/lib/gift-email";
 import { createGiftClaim, getGiftDetails } from "~/lib/gifts";
 import { markPaid } from "~/lib/orders";
+import { recordOrphanPayment, type OrphanReason } from "~/lib/orphan-payments";
 import { verifyStripeSignature } from "~/lib/stripe-signature";
 
 export const Route = createFileRoute("/api/stripe-webhook")({
@@ -67,8 +68,12 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   const orderId = session.client_reference_id;
   if (!orderId) {
     // A payment link opened directly, without going through /api/checkout.
-    // Real money, no order to attach it to — worth a log line.
+    // Real money, no order (for a gift: no recipient, no claim link). Record
+    // it for support instead of dropping it; see ~/lib/orphan-payments.
     console.warn("paid session with no client_reference_id:", session.id);
+    if (session.payment_status === "paid") {
+      return orphan(event, "no-order-reference", "no order reference");
+    }
     return new Response("no order reference", { status: 200 });
   }
 
@@ -98,7 +103,7 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
 
   if (result !== "applied" && result !== "duplicate" && result !== "already-paid") {
     console.error("fulfilment refused:", result, orderId, session.id);
-    return new Response(result, { status: 200 });
+    return orphan(event, result, result);
   }
 
   // A paid gift is the one SKU with something to deliver. Mint the claim
@@ -123,6 +128,32 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   return new Response(result, { status: 200 });
 }
 
+/**
+ * Paid but unfulfillable: persist it for manual reissue/refund. 200 once
+ * recorded (a retry can never fix it); 500 if the record could not be written,
+ * so Stripe retries until it is.
+ */
+async function orphan(event: StripeEvent, reason: OrphanReason, body: string): Promise<Response> {
+  const s = event.data?.object ?? {};
+  try {
+    await recordOrphanPayment({
+      sessionId: s.id ?? event.id,
+      eventId: event.id,
+      reason,
+      orderRef: s.client_reference_id ?? null,
+      paymentLink: s.payment_link ?? null,
+      paymentIntent: s.payment_intent ?? null,
+      amountCents: typeof s.amount_total === "number" ? s.amount_total : null,
+      currency: s.currency ?? null,
+      customerEmail: s.customer_details?.email ?? null,
+    });
+  } catch (err) {
+    console.error("could not record orphan payment", s.id, err);
+    return new Response("orphan record failed", { status: 500 });
+  }
+  return new Response(body, { status: 200 });
+}
+
 /** The slice of Stripe's event shape this endpoint reads. */
 type StripeEvent = {
   id: string;
@@ -135,6 +166,8 @@ type StripeEvent = {
       payment_status?: string;
       amount_total?: number;
       currency?: string;
+      payment_link?: string | null;
+      customer_details?: { email?: string | null } | null;
     };
   };
 };

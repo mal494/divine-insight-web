@@ -118,6 +118,19 @@ needed. Just do not edit a link's price in the dashboard without updating
 `SKUS`, because the webhook compares the two and refuses to fulfil on a
 mismatch.
 
+**Paid but unfulfillable sessions (orphan payments)**
+
+A Payment Link is a public URL, so someone can pay without going through
+`/api/checkout` (no `client_reference_id`). For a Gift Reading that means no
+order, no recipient email and no claim link. The webhook never drops these: a
+**paid** session with no order reference, an unknown order id, or an
+amount/currency mismatch is written to `orphan_payments` (idempotent on the
+Stripe session id; reason, payment link, amount, currency, buyer email) and
+logged as `ORPHAN_PAYMENT`. If that write fails the webhook answers 500 so
+Stripe retries. Per product policy these go to support for a manual reissue or
+refund; nothing is refunded automatically. Support query:
+`select * from orphan_payments where resolved_at is null order by created_at desc;`
+
 ## Testing it
 
 ```sh
@@ -157,6 +170,7 @@ the schema bootstraps itself):
 - `readings` - every stored reading, keyed to its order (this is the journal)
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
+- `orphan_payments` - paid Stripe sessions the webhook could not fulfil (see below)
 
 ## Divine Insight Pro
 
