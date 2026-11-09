@@ -87,7 +87,7 @@ describe("N2: Resend timeout", () => {
 
 describe("N3: Resend 409 handling", () => {
   test("invalid_idempotent_request (key reused, different body) is permanent", async () => {
-    fetchMock.mockResolvedValue(json(409, { name: "invalid_idempotent_request", message: "x" }));
+    fetchMock.mockImplementation(async () => json(409, { name: "invalid_idempotent_request", message: "x" }));
     await expect(sendGiftEmail(recipient)).resolves.toBe("rejected");
     await expect(sendGiftBuyerEmail(buyer)).resolves.toBe("rejected");
   });
@@ -97,8 +97,24 @@ describe("N3: Resend 409 handling", () => {
     await expect(sendGiftEmail(recipient)).resolves.toBe("failed");
   });
 
-  test("an unrecognised or unparseable 409 is permanent (never loops)", async () => {
-    fetchMock.mockResolvedValue(new Response("conflict", { status: 409 }));
+  test("R7-1: resource_locked, unknown and unparseable 409s are transient (bounded by the cap)", async () => {
+    fetchMock.mockImplementation(async () => json(409, { name: "resource_locked", message: "x" }));
+    await expect(sendGiftEmail(recipient)).resolves.toBe("failed");
+    fetchMock.mockImplementation(async () => json(409, { name: "something_new" }));
+    await expect(sendGiftEmail(recipient)).resolves.toBe("failed");
+    fetchMock.mockImplementation(async () => new Response("conflict", { status: 409 }));
+    await expect(sendGiftBuyerEmail(buyer)).resolves.toBe("failed");
+  });
+
+  test("R7-2: 401 / 403 (bad or restricted key, unverified domain) are transient within the cap", async () => {
+    fetchMock.mockImplementation(async () => json(401, { name: "missing_api_key" }));
+    await expect(sendGiftEmail(recipient)).resolves.toBe("failed");
+    fetchMock.mockImplementation(async () => json(403, { name: "invalid_api_key" }));
+    await expect(sendGiftBuyerEmail(buyer)).resolves.toBe("failed");
+  });
+
+  test("a 422 (invalid address) stays permanent", async () => {
+    fetchMock.mockImplementation(async () => json(422, { name: "validation_error" }));
     await expect(sendGiftEmail(recipient)).resolves.toBe("rejected");
   });
 
@@ -111,7 +127,10 @@ describe("N3: Resend 409 handling", () => {
     expect(classifyResend(503)).toBe("failed");
     expect(classifyResend(409, "concurrent_idempotent_requests")).toBe("failed");
     expect(classifyResend(409, "invalid_idempotent_request")).toBe("rejected");
-    expect(classifyResend(409)).toBe("rejected");
+    expect(classifyResend(409, "resource_locked")).toBe("failed");
+    expect(classifyResend(409)).toBe("failed");
+    expect(classifyResend(401)).toBe("failed");
+    expect(classifyResend(403)).toBe("failed");
     expect(classifyResend(400)).toBe("rejected");
     expect(classifyResend(422)).toBe("rejected");
   });
