@@ -4,7 +4,9 @@
  * Before this module the four links were hardcoded LIVE-mode URLs shipped to
  * every environment, so a Vercel Preview sent testers to real checkout. Now:
  *
- *   - Production (VERCEL_ENV=production): STRIPE_PAYMENT_LINK_<SKU> if set,
+ *   - Production (VERCEL_ENV=production, or PAYMENT_LINKS_MODE=live, which
+ *     go-live.sh sets because its `vercel deploy` runs as a Preview-type
+ *     deployment): STRIPE_PAYMENT_LINK_<SKU> if set,
  *     which must be a live-mode https://buy.stripe.com/… link; otherwise the
  *     current live link below (so production keeps working with no config).
  *   - Everything else (preview, development, local, tests): the env var MUST be
@@ -51,7 +53,7 @@ export class PaymentLinkConfigError extends Error {
 type Env = Record<string, string | undefined>;
 
 export function isProductionDeploy(env: Env = process.env): boolean {
-  return env.VERCEL_ENV === "production";
+  return env.VERCEL_ENV === "production" || env.PAYMENT_LINKS_MODE === "live";
 }
 
 /** Resolve the Stripe link for a SKU, or throw PaymentLinkConfigError. */

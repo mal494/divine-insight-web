@@ -8,8 +8,13 @@ export default defineConfig({
   // Which deployment this bundle is for ("production" | "preview" |
   // "development" on Vercel; empty locally). Client code uses it to pick
   // live vs test-mode Stripe tip links (see resolveTipLinks in lib/payments).
+  // go-live.sh builds locally and sets PAYMENT_LINKS_MODE=live instead.
   define: {
-    "import.meta.env.VITE_DEPLOY_ENV": JSON.stringify(process.env.VERCEL_ENV ?? ""),
+    "import.meta.env.VITE_DEPLOY_ENV": JSON.stringify(
+      process.env.PAYMENT_LINKS_MODE === "live"
+        ? "production"
+        : (process.env.VERCEL_ENV ?? ""),
+    ),
   },
   server: {
     port: 3000,

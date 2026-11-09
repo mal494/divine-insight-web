@@ -43,6 +43,23 @@ describe("resolvePaymentLink", () => {
     expect(resolvePaymentLink("singleInsight", env)).toBe(LIVE_LINK);
   });
 
+  test("PAYMENT_LINKS_MODE=live (go-live.sh deploys) behaves like production", () => {
+    for (const sku of SKU_KEYS) {
+      expect(
+        resolvePaymentLink(sku, {
+          VERCEL_ENV: "preview",
+          PAYMENT_LINKS_MODE: "live",
+        }),
+      ).toBe(LIVE_PAYMENT_LINK_DEFAULTS[sku]);
+    }
+    expect(() =>
+      resolvePaymentLink("singleInsight", {
+        VERCEL_ENV: "preview",
+        PAYMENT_LINKS_MODE: "test",
+      }),
+    ).toThrow(PaymentLinkConfigError);
+  });
+
   test("production refuses a test-mode or non-Stripe link", () => {
     for (const bad of [TEST_LINK, "https://evil.example/pay", "not a url"]) {
       const env = {
