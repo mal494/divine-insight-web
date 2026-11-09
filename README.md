@@ -89,6 +89,7 @@ None are required to build or run the dev server. These matter at deploy time:
 | `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
 | `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
 | `STRIPE_PAYMENT_LINK_SINGLE_INSIGHT`, `STRIPE_PAYMENT_LINK_EXTENDED_READING`, `STRIPE_PAYMENT_LINK_READING_BUNDLE`, `STRIPE_PAYMENT_LINK_GIFT_READING` | `/api/checkout` via `src/lib/payment-links.ts` | Stripe Payment Link per SKU. **Required outside production and must be TEST-mode (`https://buy.stripe.com/test_…`)**; production falls back to the current live links when unset. See PAYMENTS.md |
+| `LEGACY_ORDER_ACCESS_UNTIL` | `/api/order/:id`, `/api/reading` | Optional ISO date/time. Until then, orders created before access tokens existed stay readable/spendable by id alone; unset = open, past or invalid = closed |
 | `VITE_STRIPE_TIP_LINK_3` / `_5` / `_10` | tip rail (build time) | TEST-mode tip links for non-production builds; without them the tip rail is hidden outside production |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `GEMINI_API_KEY` | `/api/gemini/v1beta/models/{model}:{operation}` | Server-only Gemini API key used by the proxy |

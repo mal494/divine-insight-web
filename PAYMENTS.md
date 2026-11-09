@@ -148,7 +148,9 @@ seconds of the receipt, without a refresh.
 To check the gate actually holds, open `/api/order/<a made-up uuid>` - it must
 answer 404, and `/api/reading` with that id must answer 402. The same must hold
 for a real order id sent without its `x-order-token` (orders created before
-access tokens existed have no stored hash and are still readable by id). `/claim/<junk>`
+access tokens existed have no stored hash and are still readable by id until
+`LEGACY_ORDER_ACCESS_UNTIL`, an ISO date/time; unset = open, past or invalid =
+closed). `/claim/<junk>`
 must show the expired-link page.
 
 ### Unit tests
@@ -170,7 +172,18 @@ the schema bootstraps itself):
 - `readings` - every stored reading, keyed to its order (this is the journal)
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
+
+Two later additions are **not** self-created; they come from
+`migrations/0004_order_access_and_orphans.sql`, which must be applied (with the
+unpooled URL) **before** deploying the code that uses them:
+
+- `orders.access_token_hash` - SHA-256 of the per-order access token
 - `orphan_payments` - paid Stripe sessions the webhook could not fulfil (see below)
+
+Without 0004 the code fails closed: checkout and the order/reading endpoints
+answer 503, and the webhook answers 500 for unfulfillable sessions so Stripe
+retries. The self-created tables are bootstrapped at most once per server
+process (no DDL on every request).
 
 ## Divine Insight Pro
 
