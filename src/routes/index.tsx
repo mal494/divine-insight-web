@@ -310,7 +310,8 @@ function Home() {
              * (useEntitlement inside ExtendedReading). Do not wrap it in
              * PremiumGate — that would block customers who already paid $9.99
              * (or a Bundle) and would also hide the existing Stripe unlock CTA.
-             * Pro subscription gates the three-card spread and Journal instead.
+             * The three-card spread is free; Pro gates only the Journal (Celtic
+             * Cross and vector scoring are not built yet).
              */
             <ExtendedReading />
           ) : view === "journal" && isPremium ? (
@@ -346,174 +347,170 @@ function Home() {
                     arcana and all four suits of everyday life. Return whenever
                     you want a moment of reflection.
                   </p>
-                  {isPremium ? (
-                    <div
-                      className="animate-fade-up mt-10 flex flex-col items-start gap-3"
-                      style={{ animationDelay: "0.35s" }}
+                  {/* Three-card draw is free for everyone (not Pro). */}
+                  <div
+                    className="animate-fade-up mt-10 flex flex-col items-start gap-3"
+                    style={{ animationDelay: "0.35s" }}
+                  >
+                    <label className="w-full max-w-xs sm:max-w-sm">
+                      <span className="sr-only">
+                        What's on your mind? (optional)
+                      </span>
+                      <input
+                        type="text"
+                        value={question}
+                        onChange={(e) => setQuestion(e.target.value)}
+                        placeholder="What's on your mind? (optional)"
+                        autoComplete="off"
+                        className="w-full rounded-full border border-gold-500/30 bg-night-900/75 px-5 py-3 text-sm text-cream-100 placeholder:text-cream-100/35 transition focus:border-gold-400/70 focus:ring-2 focus:ring-gold-500/25 focus:outline-none"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      onClick={startReading}
+                      disabled={drawing}
+                      className="group inline-flex cursor-pointer items-center gap-3 rounded-full bg-gradient-to-b from-gold-300 via-gold-400 to-gold-500 px-9 py-4 text-sm font-medium tracking-[0.14em] text-night-950 uppercase shadow-[0_10px_40px_rgba(198,160,85,0.35)] transition hover:shadow-[0_12px_55px_rgba(198,160,85,0.55)] hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 sm:text-base"
                     >
-                      <label className="w-full max-w-xs sm:max-w-sm">
-                        <span className="sr-only">
-                          What's on your mind? (optional)
-                        </span>
-                        <input
-                          type="text"
-                          value={question}
-                          onChange={(e) => setQuestion(e.target.value)}
-                          placeholder="What's on your mind? (optional)"
-                          autoComplete="off"
-                          className="w-full rounded-full border border-gold-500/30 bg-night-900/75 px-5 py-3 text-sm text-cream-100 placeholder:text-cream-100/35 transition focus:border-gold-400/70 focus:ring-2 focus:ring-gold-500/25 focus:outline-none"
-                        />
-                      </label>
-                      <button
-                        type="button"
-                        onClick={startReading}
-                        disabled={drawing}
-                        className="group inline-flex cursor-pointer items-center gap-3 rounded-full bg-gradient-to-b from-gold-300 via-gold-400 to-gold-500 px-9 py-4 text-sm font-medium tracking-[0.14em] text-night-950 uppercase shadow-[0_10px_40px_rgba(198,160,85,0.35)] transition hover:shadow-[0_12px_55px_rgba(198,160,85,0.55)] hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 sm:text-base"
+                      <span>{ctaLabel}</span>
+                      <span
+                        aria-hidden
+                        className="text-base transition-transform group-hover:rotate-45 sm:text-lg"
                       >
-                        <span>{ctaLabel}</span>
-                        <span
-                          aria-hidden
-                          className="text-base transition-transform group-hover:rotate-45 sm:text-lg"
-                        >
-                          ✦
-                        </span>
-                      </button>
-                    </div>
-                  ) : (
-                    <div
-                      className="animate-fade-up mt-10 flex flex-col items-start gap-3 sm:flex-row sm:items-center"
-                      style={{ animationDelay: "0.35s" }}
+                        ✦
+                      </span>
+                    </button>
+                  </div>
+                  <div
+                    className="animate-fade-up mt-4 flex flex-col items-start gap-3 sm:flex-row sm:items-center"
+                    style={{ animationDelay: "0.4s" }}
+                  >
+                    <a
+                      href="#daily-card"
+                      className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
                     >
-                      <a
-                        href="#daily-card"
-                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                      >
-                        <span>See today&rsquo;s free card</span>
-                        <span aria-hidden>✦</span>
-                      </a>
-                      <a
-                        href="#paid-readings"
-                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                      >
-                        <span>Browse paid readings</span>
-                        <span aria-hidden>✦</span>
-                      </a>
-                    </div>
-                  )}
+                      <span>See today&rsquo;s free card</span>
+                      <span aria-hidden>✦</span>
+                    </a>
+                    <a
+                      href="#paid-readings"
+                      className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                    >
+                      <span>Browse paid readings</span>
+                      <span aria-hidden>✦</span>
+                    </a>
+                  </div>
                 </div>
               </section>
 
               {/* Card of the Day — free daily retention strip (always ungated) */}
               <DailyCard />
 
-              {/* Three-card Past · Present · Future — Pro-gated */}
-              <PremiumGate>
-                <section
-                  id="reading"
-                  className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
+              {/* Three-card Past · Present · Future — free for everyone (never Pro-gated) */}
+              <section
+                id="reading"
+                className="scroll-mt-24 pb-16 sm:scroll-mt-28 sm:pb-24"
+              >
+                <div className="animate-fade-up text-center">
+                  <p className="text-[10px] tracking-[0.45em] text-gold-400 uppercase sm:text-xs">
+                    The reading
+                  </p>
+                  <h2 className="mt-4 font-display text-4xl font-medium tracking-[0.08em] text-cream-50 sm:text-5xl">
+                    Past · Present · Future
+                  </h2>
+                  <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
+                    Hold a question or intention in your mind, then draw. Three
+                    cards from the full deck turn to greet you in turn.
+                  </p>
+                </div>
+
+                <div
+                  aria-live="polite"
+                  className="animate-fade-up mt-10 grid grid-cols-3 items-start gap-3 sm:mt-14 sm:gap-8 lg:gap-14"
+                  style={{ animationDelay: "0.15s" }}
                 >
-                  <div className="animate-fade-up text-center">
-                    <p className="text-[10px] tracking-[0.45em] text-gold-400 uppercase sm:text-xs">
-                      The reading
-                    </p>
-                    <h2 className="mt-4 font-display text-4xl font-medium tracking-[0.08em] text-cream-50 sm:text-5xl">
-                      Past · Present · Future
-                    </h2>
-                    <p className="mx-auto mt-4 max-w-md text-sm leading-relaxed text-cream-100/55">
-                      Hold a question or intention in your mind, then draw. Three
-                      cards from the full deck turn to greet you in turn.
-                    </p>
-                  </div>
-
-                  <div
-                    aria-live="polite"
-                    className="animate-fade-up mt-10 grid grid-cols-3 items-start gap-3 sm:mt-14 sm:gap-8 lg:gap-14"
-                    style={{ animationDelay: "0.15s" }}
-                  >
-                    {POSITIONS.map((pos, i) => (
-                      <CardSlot
-                        key={pos.label}
-                        position={pos}
-                        card={cards[i] ?? null}
-                        revealed={revealed[i]}
-                      />
-                    ))}
-                  </div>
-
-                  {phase === "done" && summary && (
-                    <ReadingPanel
-                      summary={summary}
-                      kicker="Woven from your three cards"
-                      title="Your reading"
+                  {POSITIONS.map((pos, i) => (
+                    <CardSlot
+                      key={pos.label}
+                      position={pos}
+                      card={cards[i] ?? null}
+                      revealed={revealed[i]}
                     />
-                  )}
+                  ))}
+                </div>
 
-                  {phase === "done" && summary && (
-                    <div className="animate-fade-up mx-auto mt-8 max-w-2xl rounded-2xl border border-gold-500/20 bg-night-900/40 px-6 py-5 text-center backdrop-blur-sm sm:px-8">
-                      <p className="text-[10px] tracking-[0.45em] text-gold-400/90 uppercase">
-                        This was a glimpse
-                      </p>
-                      <h3 className="mt-2 font-display text-2xl font-medium tracking-[0.08em] text-cream-50 sm:text-3xl">
-                        Go deeper
-                      </h3>
-                      <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-cream-100/60">
-                        Your three cards opened a door — a focused or five-card
-                        reading walks further through it.
-                      </p>
-                      <div className="mt-4 flex flex-col items-center justify-center gap-3 sm:flex-row">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            document
-                              .getElementById("single-insight")
-                              ?.scrollIntoView({
-                                behavior: "smooth",
-                                block: "start",
-                              })
-                          }
-                          className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                        >
-                          Single Insight · ${formatPrice(SINGLE_INSIGHT_PRICE)}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            document
-                              .getElementById("extended-reading")
-                              ?.scrollIntoView({
-                                behavior: "smooth",
-                                block: "start",
-                              })
-                          }
-                          className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
-                        >
-                          Extended Reading · $
-                          {formatPrice(EXTENDED_READING_PRICE)}
-                        </button>
-                      </div>
-                    </div>
-                  )}
+                {phase === "done" && summary && (
+                  <ReadingPanel
+                    summary={summary}
+                    kicker="Woven from your three cards"
+                    title="Your reading"
+                  />
+                )}
 
-                  <div className="mt-10 flex min-h-[5rem] flex-col items-center gap-3 sm:mt-14">
-                    {phase === "done" && (
+                {phase === "done" && summary && (
+                  <div className="animate-fade-up mx-auto mt-8 max-w-2xl rounded-2xl border border-gold-500/20 bg-night-900/40 px-6 py-5 text-center backdrop-blur-sm sm:px-8">
+                    <p className="text-[10px] tracking-[0.45em] text-gold-400/90 uppercase">
+                      This was a glimpse
+                    </p>
+                    <h3 className="mt-2 font-display text-2xl font-medium tracking-[0.08em] text-cream-50 sm:text-3xl">
+                      Go deeper
+                    </h3>
+                    <p className="mx-auto mt-2 max-w-md text-sm leading-relaxed text-cream-100/60">
+                      Your three cards opened a door — a focused or five-card
+                      reading walks further through it.
+                    </p>
+                    <div className="mt-4 flex flex-col items-center justify-center gap-3 sm:flex-row">
                       <button
                         type="button"
-                        onClick={startReading}
-                        className="inline-flex cursor-pointer items-center gap-2.5 rounded-full border border-gold-500/50 px-8 py-3.5 text-sm tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                        onClick={() =>
+                          document
+                            .getElementById("single-insight")
+                            ?.scrollIntoView({
+                              behavior: "smooth",
+                              block: "start",
+                            })
+                        }
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
                       >
-                        <span>Draw again</span>
-                        <span aria-hidden>✦</span>
+                        Single Insight · ${formatPrice(SINGLE_INSIGHT_PRICE)}
                       </button>
-                    )}
-                    {phase === "done" && (
-                      <p className="text-xs text-cream-100/40">
-                        A fresh shuffle, a new lens — the deck holds all
-                        seventy-eight cards.
-                      </p>
-                    )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          document
+                            .getElementById("extended-reading")
+                            ?.scrollIntoView({
+                              behavior: "smooth",
+                              block: "start",
+                            })
+                        }
+                        className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-gold-500/50 px-6 py-2.5 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                      >
+                        Extended Reading · $
+                        {formatPrice(EXTENDED_READING_PRICE)}
+                      </button>
+                    </div>
                   </div>
-                </section>
-              </PremiumGate>
+                )}
+
+                <div className="mt-10 flex min-h-[5rem] flex-col items-center gap-3 sm:mt-14">
+                  {phase === "done" && (
+                    <button
+                      type="button"
+                      onClick={startReading}
+                      className="inline-flex cursor-pointer items-center gap-2.5 rounded-full border border-gold-500/50 px-8 py-3.5 text-sm tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10 hover:text-gold-200 active:scale-[0.98]"
+                    >
+                      <span>Draw again</span>
+                      <span aria-hidden>✦</span>
+                    </button>
+                  )}
+                  {phase === "done" && (
+                    <p className="text-xs text-cream-100/40">
+                      A fresh shuffle, a new lens — the deck holds all
+                      seventy-eight cards.
+                    </p>
+                  )}
+                </div>
+              </section>
 
               {/* Paid reading ladder — Single · Extended · Bundle · Gift */}
               <Pricing />

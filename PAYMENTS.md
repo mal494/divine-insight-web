@@ -141,14 +141,15 @@ gated markup at all.
 
 | Surface | What a free visitor sees |
 | --- | --- |
-| Three-card Past / Present / Future (`#reading`) | Hidden. `PremiumGate` does not mount the section. |
+| Three-card Past / Present / Future (`#reading`) | **Free for everyone.** Not wrapped in `PremiumGate` (owner decision, Oct 16). |
 | Journal tab | Hidden. The tab renders only when `isPremium` is true, and the panel is still wrapped in `PremiumGate`. The list is the hardcoded `SAMPLE_ENTRIES` in `src/components/Journal.tsx`. |
-| Hero | Two links: **See today's free card** (`#daily-card`) and **Browse paid readings** (`#paid-readings`). The three-card draw control is not shown. |
+| Hero | The free three-card draw control (optional question + **Draw your cards**), then two links: **See today's free card** (`#daily-card`) and **Browse paid readings** (`#paid-readings`). |
 | Card of the Day | Always visible. Its CTA goes to `#paid-readings`. |
 | Extended tab | Not wrapped in `PremiumGate`. `useEntitlement("extendedReading")` still unlocks a paid one-time reading, and a `readingBundle` order unlocks that draw too. |
 | Pricing, Single Insight, Gift, tips, All Cards | Unchanged one-time SKU flow. No Pro upgrade copy. |
 
-The Celtic Cross and 1-to-5 vector scoring screens are not built. The Extended
+Pro (when it ships) covers the Journal, the Celtic Cross and 1-to-5 vector
+scoring. The Celtic Cross and vector scoring screens are not built. The Extended
 tab is still the five-card spread in `src/components/extended-reading.tsx`.
 
 ### Where the flag lives
@@ -183,7 +184,7 @@ fulfils rows in `SKUS`.
 bun run dev
 ```
 
-Use **Pro: On** in the corner to preview the three-card section and Journal.
+Use **Pro: On** in the corner to preview the Journal.
 The choice persists in this browser under `di.subscription.isPremium` for dev
 builds only. A production build has no toggle and no upgrade button.
 
