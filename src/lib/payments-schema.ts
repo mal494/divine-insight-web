@@ -91,11 +91,9 @@ export function evaluatePaymentsSchema(
   const missing: string[] = [];
   const migrations: string[] = [];
   for (const req of requirements) {
-    const gaps = missingSchema(present, req.schema).filter(
-      (g) => !missing.includes(g),
-    );
+    const gaps = missingSchema(present, req.schema);
     if (gaps.length === 0) continue;
-    missing.push(...gaps);
+    for (const g of gaps) if (!missing.includes(g)) missing.push(g);
     if (!migrations.includes(req.migration)) migrations.push(req.migration);
   }
   return { ok: missing.length === 0, missing, migrations };
