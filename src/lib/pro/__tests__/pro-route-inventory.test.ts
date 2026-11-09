@@ -13,7 +13,8 @@
  *
  * Free / one-time-paid entry points must never be Pro-gated. Note this
  * asserts "no Pro check", not "no session": one-time orders are authorized by
- * possession of the order id (bearer UUID), a separate product decision.
+ * the per-order access token issued at checkout (x-order-token, see
+ * ~/lib/order-access), a separate product decision.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -25,10 +26,15 @@ const mocks = vi.hoisted(() => ({
   saveReading: vi.fn(),
   getOrder: vi.fn(),
   listReadings: vi.fn(),
+  checkOrderAccess: vi.fn(),
 }));
 
 vi.mock("~/lib/billing/session-user", () => ({ userFromRequest: mocks.userFromRequest }));
 vi.mock("~/lib/auth/entitlements", () => ({ hasPro: mocks.hasPro }));
+vi.mock("~/lib/order-access", () => ({
+  checkOrderAccess: mocks.checkOrderAccess,
+  orderTokenFrom: (request: Request) => request.headers.get("x-order-token"),
+}));
 vi.mock("~/lib/orders", () => ({
   saveReading: mocks.saveReading,
   getOrder: mocks.getOrder,
@@ -140,11 +146,14 @@ type Handler = (ctx: { request: Request; params?: Record<string, string> }) => P
 const handlers = (route: unknown) =>
   (route as { options: { server: { handlers: Record<string, Handler> } } }).options.server.handlers;
 
+const ORDER_TOKEN = "t".repeat(43);
+
 describe("paid one-time readings keep working without Pro", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((m) => m.mockReset());
     mocks.userFromRequest.mockResolvedValue(null);
     mocks.hasPro.mockRejectedValue(new Error("must not consult Pro entitlements"));
+    mocks.checkOrderAccess.mockResolvedValue("granted");
   });
 
   test("POST /api/reading spends an order credit for a signed-out, non-Pro visitor", async () => {
@@ -152,11 +161,12 @@ describe("paid one-time readings keep working without Pro", () => {
     const res = await handlers(ReadingRoute).POST({
       request: new Request("https://divine.example/api/reading", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "x-order-token": ORDER_TOKEN },
         body: JSON.stringify({ orderId: "o1", reading: { cards: [] } }),
       }),
     });
     expect(res.status).toBe(200);
+    expect(mocks.checkOrderAccess).toHaveBeenCalledWith("o1", ORDER_TOKEN);
     expect(await res.json()).toEqual({ readingId: "r1", creditsLeft: 2 });
     expect(mocks.hasPro).not.toHaveBeenCalled();
   });
@@ -166,9 +176,12 @@ describe("paid one-time readings keep working without Pro", () => {
     mocks.listReadings.mockResolvedValue([{ id: "r1" }]);
     const res = await handlers(OrderRoute).GET({
       params: { orderId: "o1" },
-      request: new Request("https://divine.example/api/order/o1?include=readings"),
+      request: new Request("https://divine.example/api/order/o1?include=readings", {
+        headers: { "x-order-token": ORDER_TOKEN },
+      }),
     });
     expect(res.status).toBe(200);
+    expect(mocks.checkOrderAccess).toHaveBeenCalledWith("o1", ORDER_TOKEN);
     expect((await res.json()).readings).toEqual([{ id: "r1" }]);
     expect(mocks.hasPro).not.toHaveBeenCalled();
   });
