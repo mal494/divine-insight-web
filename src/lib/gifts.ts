@@ -48,10 +48,46 @@ export type GiftEmailKind = "recipient" | "buyer";
 export const GIFT_EMAIL_LEASE_SECONDS = 120;
 
 /**
+ * Bounded retries (QA round 6, N1). During a long Resend outage the webhook
+ * must not answer 500 forever: Stripe disables an endpoint that keeps failing
+ * for days. After `maxAttempts` failed sends for one email, or once the order
+ * has been paid for longer than `giveUpAfterSeconds`, we record
+ * `*_email_failed_at` and stop (the webhook answers 200). The buyer still
+ * sees the claim link on their confirmation view; support can resend by hand.
+ *
+ *   GIFT_EMAIL_MAX_ATTEMPTS   integer 1–100, default 5
+ *   GIFT_EMAIL_GIVE_UP_HOURS  number (0, 72], default 6 (Stripe retries live
+ *                             events for up to 3 days)
+ * Invalid values fall back to the defaults.
+ */
+export const GIFT_EMAIL_DEFAULT_MAX_ATTEMPTS = 5;
+export const GIFT_EMAIL_DEFAULT_GIVE_UP_HOURS = 6;
+
+export type GiftEmailRetryPolicy = { maxAttempts: number; giveUpAfterSeconds: number };
+
+export function giftEmailRetryPolicy(
+  env: Record<string, string | undefined> = process.env,
+): GiftEmailRetryPolicy {
+  const rawAttempts = env.GIFT_EMAIL_MAX_ATTEMPTS?.trim() ?? "";
+  const attempts = /^\d+$/.test(rawAttempts) ? Number(rawAttempts) : NaN;
+  const maxAttempts =
+    Number.isInteger(attempts) && attempts >= 1 && attempts <= 100
+      ? attempts
+      : GIFT_EMAIL_DEFAULT_MAX_ATTEMPTS;
+  const rawHours = env.GIFT_EMAIL_GIVE_UP_HOURS?.trim() ?? "";
+  const hours = /^\d+(\.\d+)?$/.test(rawHours) ? Number(rawHours) : NaN;
+  const giveUpHours =
+    Number.isFinite(hours) && hours > 0 && hours <= 72 ? hours : GIFT_EMAIL_DEFAULT_GIVE_UP_HOURS;
+  return { maxAttempts, giveUpAfterSeconds: Math.round(giveUpHours * 3600) };
+}
+
+/**
  * Claim the right to send one gift email (per order and kind).
  *   "reserved" — this caller must send, then call markGiftEmailSent on
  *                success or releaseGiftEmail on failure.
  *   "sent"     — already sent and recorded; nothing to do.
+ *   "gave-up"  — retries were exhausted earlier (`*_email_failed_at` set);
+ *                nothing to do, the buyer has the link.
  *   "busy"     — another delivery holds an unexpired lease (in flight, or it
  *                crashed less than GIFT_EMAIL_LEASE_SECONDS ago). The caller
  *                should answer non-2xx so Stripe retries later.
@@ -61,35 +97,38 @@ export const GIFT_EMAIL_LEASE_SECONDS = 120;
 export async function reserveGiftEmail(
   orderId: string,
   kind: GiftEmailKind,
-): Promise<"reserved" | "sent" | "busy"> {
+): Promise<"reserved" | "sent" | "busy" | "gave-up"> {
   const db = sql();
   try {
     const won =
       kind === "recipient"
         ? await db`
-            update gift_claims
-               set recipient_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
+            update gift_claims set recipient_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
              where order_id = ${orderId}
                and recipient_emailed_at is null
+               and recipient_email_failed_at is null
                and (recipient_email_lease_until is null or recipient_email_lease_until < now())
             returning order_id`
         : await db`
-            update gift_claims
-               set buyer_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
+            update gift_claims set buyer_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
              where order_id = ${orderId}
                and buyer_emailed_at is null
+               and buyer_email_failed_at is null
                and (buyer_email_lease_until is null or buyer_email_lease_until < now())
             returning order_id`;
     if (won.length > 0) return "reserved";
     const state =
       kind === "recipient"
         ? await db`
-            select recipient_emailed_at is not null as sent
+            select recipient_emailed_at is not null as sent, recipient_email_failed_at is not null as failed
               from gift_claims where order_id = ${orderId}`
         : await db`
-            select buyer_emailed_at is not null as sent
+            select buyer_emailed_at is not null as sent, buyer_email_failed_at is not null as failed
               from gift_claims where order_id = ${orderId}`;
-    return (state[0] as { sent?: boolean } | undefined)?.sent ? "sent" : "busy";
+    const row = state[0] as { sent?: boolean; failed?: boolean } | undefined;
+    if (row?.sent) return "sent";
+    if (row?.failed) return "gave-up";
+    return "busy";
   } catch (err) {
     if (isMissingColumn(err)) throw new GiftSchemaMissingError(err);
     throw err;
@@ -110,18 +149,69 @@ export async function markGiftEmailSent(orderId: string, kind: GiftEmailKind): P
   }
 }
 
-/** Give the lease back after a failed send, so the next delivery retries at once. */
-export async function releaseGiftEmail(orderId: string, kind: GiftEmailKind): Promise<void> {
+/**
+ * Give the lease back after a failed send and count the attempt.
+ *   "retry"   — the next delivery may try again at once (caller answers 500).
+ *   "gave-up" — the attempt cap or the age cap was reached (or the failure was
+ *               permanent): `*_email_failed_at` is now set and no delivery
+ *               will send this email again; the caller answers 200.
+ * Pass `permanent: true` for a send the provider rejected for good.
+ */
+export async function releaseGiftEmail(
+  orderId: string,
+  kind: GiftEmailKind,
+  opts: { permanent?: boolean; policy?: GiftEmailRetryPolicy } = {},
+): Promise<"retry" | "gave-up"> {
   const db = sql();
+  if (opts.permanent) {
+    if (kind === "recipient") {
+      await db`
+        update gift_claims set recipient_email_failed_at = now(), recipient_email_lease_until = null
+         where order_id = ${orderId} and recipient_emailed_at is null`;
+    } else {
+      await db`
+        update gift_claims set buyer_email_failed_at = now(), buyer_email_lease_until = null
+         where order_id = ${orderId} and buyer_emailed_at is null`;
+    }
+    return "gave-up";
+  }
+  const policy = opts.policy ?? giftEmailRetryPolicy();
   if (kind === "recipient") {
     await db`
-      update gift_claims set recipient_email_lease_until = null
+      update gift_claims set recipient_email_lease_until = null,
+             recipient_email_attempts = recipient_email_attempts + 1
        where order_id = ${orderId} and recipient_emailed_at is null`;
   } else {
     await db`
-      update gift_claims set buyer_email_lease_until = null
+      update gift_claims set buyer_email_lease_until = null,
+             buyer_email_attempts = buyer_email_attempts + 1
        where order_id = ${orderId} and buyer_emailed_at is null`;
   }
+  // Second, separate statement: decide whether to stop. Idempotent, so a
+  // crash between the two only delays the decision to the next failure.
+  const stopped =
+    kind === "recipient"
+      ? await db`
+          update gift_claims set recipient_email_failed_at = now()
+           where order_id = ${orderId}
+             and recipient_emailed_at is null
+             and recipient_email_failed_at is null
+             and (recipient_email_attempts >= ${policy.maxAttempts}
+                  or coalesce((select o.paid_at from orders o where o.id = gift_claims.order_id),
+                              gift_claims.created_at)
+                     < now() - make_interval(secs => ${policy.giveUpAfterSeconds}))
+          returning order_id`
+      : await db`
+          update gift_claims set buyer_email_failed_at = now()
+           where order_id = ${orderId}
+             and buyer_emailed_at is null
+             and buyer_email_failed_at is null
+             and (buyer_email_attempts >= ${policy.maxAttempts}
+                  or coalesce((select o.paid_at from orders o where o.id = gift_claims.order_id),
+                              gift_claims.created_at)
+                     < now() - make_interval(secs => ${policy.giveUpAfterSeconds}))
+          returning order_id`;
+  return stopped.length > 0 ? "gave-up" : "retry";
 }
 
 function isMissingColumn(err: unknown): boolean {

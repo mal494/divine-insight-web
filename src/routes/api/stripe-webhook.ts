@@ -245,7 +245,8 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
 
 /**
  * Send one gift email for (order, kind) unless it was already sent.
- *   "done"  — sent now or earlier, or permanently rejected (logged).
+ *   "done"  — sent now or earlier, permanently rejected, or retries exhausted
+ *             (attempt/age cap, see giftEmailRetryPolicy); all logged.
  *   "retry" — a send failed transiently, or another delivery holds the lease;
  *             the caller answers non-2xx so Stripe redelivers.
  * Bookkeeping errors propagate (the caller answers 500).
@@ -256,7 +257,7 @@ async function deliverOnce(
   send: () => Promise<GiftSendResult>,
 ): Promise<"done" | "retry"> {
   const lease = await reserveGiftEmail(orderId, kind);
-  if (lease === "sent") return "done";
+  if (lease === "sent" || lease === "gave-up") return "done";
   if (lease === "busy") return "retry";
   let result: GiftSendResult;
   try {
@@ -269,9 +270,19 @@ async function deliverOnce(
     await markGiftEmailSent(orderId, kind);
     return "done";
   }
-  await releaseGiftEmail(orderId, kind);
   if (result === "rejected") {
+    await releaseGiftEmail(orderId, kind, { permanent: true });
     console.error("gift email permanently rejected; not retrying", { orderId, kind });
+    return "done";
+  }
+  const next = await releaseGiftEmail(orderId, kind);
+  if (next === "gave-up") {
+    // Never let a long provider outage make Stripe disable the endpoint. The
+    // buyer still has the claim link on their confirmation view.
+    console.error("gift email retries exhausted; giving up (buyer still has the link)", {
+      orderId,
+      kind,
+    });
     return "done";
   }
   return "retry";

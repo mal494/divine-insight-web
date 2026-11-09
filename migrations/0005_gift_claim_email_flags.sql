@@ -17,6 +17,10 @@
 --   alter table gift_claims drop column if exists buyer_emailed_at;
 --   alter table gift_claims drop column if exists recipient_email_lease_until;
 --   alter table gift_claims drop column if exists buyer_email_lease_until;
+--   alter table gift_claims drop column if exists recipient_email_attempts;
+--   alter table gift_claims drop column if exists buyer_email_attempts;
+--   alter table gift_claims drop column if exists recipient_email_failed_at;
+--   alter table gift_claims drop column if exists buyer_email_failed_at;
 begin;
 
 -- Same definition as 0004, repeated (no-op when present) so this file is
@@ -37,6 +41,15 @@ alter table gift_claims add column if not exists buyer_emailed_at timestamptz;
 -- mid-send leaves just the lease, which expires, so a Stripe retry sends it.
 alter table gift_claims add column if not exists recipient_email_lease_until timestamptz;
 alter table gift_claims add column if not exists buyer_email_lease_until timestamptz;
+-- Bounded retries (QA round 6): failed sends are counted, and after
+-- GIFT_EMAIL_MAX_ATTEMPTS (default 5) or GIFT_EMAIL_GIVE_UP_HOURS since the
+-- order was paid (default 6) *_email_failed_at is set and the webhook stops
+-- asking Stripe to retry (answers 200), so a long Resend outage can never get
+-- the endpoint disabled. The buyer still sees the claim link.
+alter table gift_claims add column if not exists recipient_email_attempts integer not null default 0;
+alter table gift_claims add column if not exists buyer_email_attempts integer not null default 0;
+alter table gift_claims add column if not exists recipient_email_failed_at timestamptz;
+alter table gift_claims add column if not exists buyer_email_failed_at timestamptz;
 
 -- Existing rows are left NULL on purpose: production never had Resend
 -- configured, so no gift email has ever actually been sent. Stripe does not
