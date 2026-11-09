@@ -14,6 +14,24 @@ Before this, fulfilment was honor-based: the unlock CTA opened a Stripe payment
 link and the draw was never gated, so every paid reading was free to anyone who
 scrolled past the CTA.
 
+## Paid checkout is paused by default
+
+Paid readings, the bundle and Gift Readings are fulfilled only by the Stripe
+webhook. Until production has a live webhook endpoint and
+`STRIPE_WEBHOOK_SECRET`, a buyer would pay and get nothing, so paid checkout
+is **off unless explicitly enabled** (`src/lib/paid-checkout.ts`):
+
+- `VITE_PAID_CHECKOUT_ENABLED=true` (build time) shows the buy buttons in
+  Pricing, Single Insight, Extended Reading (incl. the bundle link) and Gift
+  Reading. Otherwise they show "Purchases are paused, back soon."
+- `PAID_CHECKOUT_ENABLED=true` (runtime) lets `POST /api/checkout` create
+  orders. Otherwise it answers `503 {"error":"checkout_paused"}` before any
+  order row is written.
+
+Tips (TipJar) are honor-based and unaffected. Customers who already hold a
+verified order can still draw. To re-enable: set both vars in the Vercel
+project for Production, then redeploy (the `VITE_` one is inlined at build).
+
 ## The flow
 
 1. Visitor clicks a CTA. The browser POSTs `{ sku }` to `/api/checkout` - a SKU

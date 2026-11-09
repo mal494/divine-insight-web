@@ -18,6 +18,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CardFace } from "~/components/card-face";
 import { DECK, type TarotCard } from "~/data/deck";
 import { useEntitlement } from "~/lib/entitlement";
+import { PurchasesPaused } from "~/components/purchases-paused";
+import { paidCheckoutEnabled } from "~/lib/paid-checkout";
 import { SINGLE_INSIGHT_PRICE, formatPrice } from "~/lib/payments";
 import { shuffle } from "~/lib/random";
 import { singleCardLine } from "~/lib/synthesis";
@@ -110,7 +112,8 @@ export function SingleInsight() {
           answers it, read in full — and a line to carry out of the reading.
         </p>
 
-        {!unlocked && (
+        {!unlocked && !paidCheckoutEnabled() && <PurchasesPaused />}
+        {!unlocked && paidCheckoutEnabled() && (
           <>
             <button
               type="button"
