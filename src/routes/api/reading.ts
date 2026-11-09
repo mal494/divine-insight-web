@@ -18,7 +18,12 @@
  *           402 when the order is unpaid or exhausted.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { checkOrderAccess, orderTokenFrom } from "~/lib/order-access";
+import {
+  checkOrderAccess,
+  isMissingSchemaError,
+  orderTokenFrom,
+  schemaNotMigratedResponse,
+} from "~/lib/order-access";
 import { saveReading } from "~/lib/orders";
 
 /** Guard rail: a reading payload is small. Anything larger is not one. */
@@ -59,6 +64,8 @@ export async function handleReadingPost(request: Request): Promise<Response> {
     if (!spent) return json({ error: "not_entitled" }, 402);
     return json(spent);
   } catch (err) {
+    if (isMissingSchemaError(err))
+      return schemaNotMigratedResponse("POST /api/reading", err);
     console.error("saving reading failed", err);
     return json({ error: "unavailable" }, 503);
   }

@@ -43,12 +43,9 @@ function normalizeSql(strings: TemplateStringsArray): string {
 async function query(strings: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]> {
   const sql = normalizeSql(strings);
 
-  if (
-    sql.startsWith("create table") ||
-    sql.startsWith("create index") ||
-    sql.startsWith("alter table")
-  ) {
-    return [];
+  if (/^(create|alter|drop)\b/.test(sql)) {
+    // The schema comes from migrations/0004 only; no request may run DDL.
+    throw new Error(`runtime DDL is not allowed: ${sql}`);
   }
 
   if (sql.startsWith("select id from stripe_events where id =")) {

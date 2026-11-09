@@ -99,7 +99,6 @@ vi.mock("~/lib/stripe-signature", () => ({
   verifyStripeSignature: async () => ({ ok: true }),
 }));
 vi.mock("~/lib/orders", () => ({
-  ensureSchema: async () => {},
   markPaid: mocks.markPaid,
   listReadings: async () => [],
   getOrder: async (id: string) =>

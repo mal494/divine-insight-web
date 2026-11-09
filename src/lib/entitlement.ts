@@ -176,6 +176,63 @@ export function resolveEntitlementFromOrders(
   };
 }
 
+export type CheckoutDeps = {
+  open: (url?: string, target?: string, features?: string) => CheckoutTabHandle | null;
+  fetch: (input: string, init?: RequestInit) => Promise<Response>;
+  assignCurrentTab: (url: string) => void;
+};
+
+export type CheckoutResult =
+  | { ok: true; orderId: string; accessToken: string | null }
+  | { ok: false };
+
+/**
+ * The checkout click, minus React state. The Stripe tab MUST be opened in the
+ * synchronous part of this function — before the first `await` — or the
+ * browser no longer treats it as part of the user's click and a popup blocker
+ * drops it after the order is already pending (issue #22). The tab is then
+ * navigated once /api/checkout answers, and closed if it fails.
+ */
+export async function runCheckout(
+  sku: Sku,
+  gift: GiftDetails | undefined,
+  deps: CheckoutDeps,
+): Promise<CheckoutResult> {
+  const { checkoutTab, popupBlocked } = openCheckoutTab(deps.open);
+  try {
+    const res = await deps.fetch("/api/checkout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sku,
+        recipientEmail: gift?.recipientEmail,
+        senderName: gift?.senderName,
+        note: gift?.note,
+      }),
+    });
+    if (!res.ok) {
+      checkoutTab?.close();
+      return { ok: false };
+    }
+    const { orderId, accessToken, url } = (await res.json()) as {
+      orderId: string;
+      accessToken?: string;
+      url: string;
+    };
+    // Fallback to same-tab only when a popup was actually blocked.
+    navigateCheckout({
+      checkoutTab,
+      popupBlocked,
+      url,
+      assignCurrentTab: deps.assignCurrentTab,
+    });
+    return { ok: true, orderId, accessToken: accessToken ?? null };
+  } catch {
+    checkoutTab?.close();
+    return { ok: false };
+  }
+}
+
 export function useEntitlement(
   primary: Sku,
   options?: { alsoAccept?: Sku[] },
@@ -282,50 +339,32 @@ export function useEntitlement(
   const startCheckout = useCallback(
     async (opts?: CheckoutOptions) => {
       const sku = opts?.sku ?? primary;
-      // Open synchronously inside the click gesture; we navigate it once the
-      // checkout session URL comes back from the server.
-      const { checkoutTab, popupBlocked } = openCheckoutTab(window.open.bind(window));
+      // runCheckout opens the tab synchronously, inside this click gesture,
+      // before its first await (issue #22).
+      const pending = runCheckout(sku, opts, {
+        open: window.open.bind(window),
+        fetch: window.fetch.bind(window),
+        assignCurrentTab: window.location.assign.bind(window.location),
+      });
       setBusy(true);
       try {
-        const res = await fetch("/api/checkout", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            sku,
-            recipientEmail: opts?.recipientEmail,
-            senderName: opts?.senderName,
-            note: opts?.note,
-          }),
-        });
-        if (!res.ok) {
-          checkoutTab?.close();
+        const result = await pending;
+        if (!result.ok) {
           setStatus("unavailable");
           return;
         }
-        const { orderId, accessToken, url } = (await res.json()) as {
-          orderId: string;
-          accessToken?: string;
-          url: string;
-        };
+        const { orderId, accessToken } = result;
         window.localStorage.setItem(STORAGE_PREFIX + sku, orderId);
         if (accessToken) {
           window.localStorage.setItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX, accessToken);
         } else {
           window.localStorage.removeItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
         }
-        orderTokens.current.set(orderId, accessToken ?? null);
+        orderTokens.current.set(orderId, accessToken);
         if (!skusRef.current.includes(sku)) skusRef.current.push(sku);
         setStatus("awaiting-payment");
-        // Fallback only when a popup was actually blocked.
-        navigateCheckout({
-          checkoutTab,
-          popupBlocked,
-          url,
-          assignCurrentTab: window.location.assign.bind(window.location),
-        });
         beginPolling();
       } catch {
-        checkoutTab?.close();
         setStatus("unavailable");
       } finally {
         setBusy(false);

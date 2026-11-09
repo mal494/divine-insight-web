@@ -69,6 +69,7 @@ const NEVER_PRO_GATED = [
   "auth/$.ts",
   "auth-confirm.ts",
   "gemini/v1beta/models/$modelAndOperation.ts",
+  "health/payments.ts",
 ];
 
 /** Every createServerFn module, and whether it is Pro-gated. */
