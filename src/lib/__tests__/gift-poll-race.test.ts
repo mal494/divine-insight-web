@@ -72,16 +72,19 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     const kind = lease[1] as "recipient" | "buyer";
         const [secs, orderId] = values as [number, string];
     const c = claims.find((x) => x.order_id === orderId);
-    if (!c || c[`${kind}_emailed_at`]) return [];
+    if (!c || c[`${kind}_emailed_at`] || (c as Record<string, unknown>)[`${kind}_email_failed_at`]) return [];
     const until = c[`${kind}_email_lease_until`];
     if (until && until > Date.now()) return [];
     c[`${kind}_email_lease_until`] = Date.now() + Number(secs) * 1000;
     return [{ order_id: orderId }];
   }
-  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent from gift_claims/.exec(q);
+  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent(?:, \w+ is not null as failed)? from gift_claims/.exec(q);
   if (sentQ) {
     const c = claims.find((x) => x.order_id === values[0]);
-    return c ? [{ sent: Boolean(c[`${sentQ[1] as "recipient" | "buyer"}_emailed_at`]) }] : [];
+    const k = sentQ[1] as "recipient" | "buyer";
+    return c
+      ? [{ sent: Boolean(c[`${k}_emailed_at`]), failed: Boolean((c as Record<string, unknown>)[`${k}_email_failed_at`]) }]
+      : [];
   }
   const mark = /^update gift_claims set (recipient|buyer)_emailed_at = now\(\), \w+ = null/.exec(q);
   if (mark) {
@@ -93,11 +96,38 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     }
     return [];
   }
+  const failQ = /^update gift_claims set (recipient|buyer)_email_failed_at = now\(\)(, \w+ = null)? where/.exec(q);
+  if (failQ) {
+    const kind = failQ[1] as "recipient" | "buyer";
+    const c = claims.find((x) => x.order_id === values[0]) as Record<string, unknown> | undefined;
+    if (!c || c[`${kind}_emailed_at`]) return [];
+    if (failQ[2]) {
+      // permanent rejection
+      c[`${kind}_email_failed_at`] = new Date();
+      c[`${kind}_email_lease_until`] = null;
+      return [];
+    }
+    if (c[`${kind}_email_failed_at`]) return [];
+    const [, maxAttempts, giveUpSecs] = values as [string, number, number];
+    const paidAt = ((order as unknown as Record<string, unknown>).paid_at as Date | undefined)?.getTime() ?? Date.now();
+    const tooOld = paidAt < Date.now() - Number(giveUpSecs) * 1000;
+    if (Number(c[`${kind}_email_attempts`] ?? 0) >= Number(maxAttempts) || tooOld) {
+      c[`${kind}_email_failed_at`] = new Date();
+      return [{ order_id: values[0] }];
+    }
+    return [];
+  }
   const release = /^update gift_claims set (recipient|buyer)_email_lease_until = null/.exec(q);
   if (release) {
     const kind = release[1] as "recipient" | "buyer";
     const c = claims.find((x) => x.order_id === values[0]);
-    if (c && !c[`${kind}_emailed_at`]) c[`${kind}_email_lease_until`] = null;
+    if (c && !c[`${kind}_emailed_at`]) {
+      c[`${kind}_email_lease_until`] = null;
+      if (q.includes("_email_attempts = ")) {
+        const r = c as Record<string, unknown>;
+        r[`${kind}_email_attempts`] = Number(r[`${kind}_email_attempts`] ?? 0) + 1;
+      }
+    }
     return [];
   }
   if (q.startsWith("select c.token as stored_token")) {

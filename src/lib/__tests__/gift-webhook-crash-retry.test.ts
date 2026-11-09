@@ -94,17 +94,20 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     step(`reserve-${kind}`);
     const [secs, orderId] = values as [number, string];
     const c = claims.find((x) => x.order_id === orderId);
-    if (!c || c[`${kind}_emailed_at`]) return [];
+    if (!c || c[`${kind}_emailed_at`] || (c as Record<string, unknown>)[`${kind}_email_failed_at`]) return [];
     const until = c[`${kind}_email_lease_until`];
     if (until && until > clock) return [];
     c[`${kind}_email_lease_until`] = clock + Number(secs) * 1000;
     step(`after-reserve-${kind}`); // committed, then the process dies
     return [{ order_id: orderId }];
   }
-  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent from gift_claims/.exec(q);
+  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent(?:, \w+ is not null as failed)? from gift_claims/.exec(q);
   if (sentQ) {
     const c = claims.find((x) => x.order_id === values[0]);
-    return c ? [{ sent: Boolean(c[`${sentQ[1] as "recipient" | "buyer"}_emailed_at`]) }] : [];
+    const k = sentQ[1] as "recipient" | "buyer";
+    return c
+      ? [{ sent: Boolean(c[`${k}_emailed_at`]), failed: Boolean((c as Record<string, unknown>)[`${k}_email_failed_at`]) }]
+      : [];
   }
   const mark = /^update gift_claims set (recipient|buyer)_emailed_at = now\(\), \w+ = null/.exec(q);
   if (mark) {
@@ -117,11 +120,38 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     }
     return [];
   }
+  const failQ = /^update gift_claims set (recipient|buyer)_email_failed_at = now\(\)(, \w+ = null)? where/.exec(q);
+  if (failQ) {
+    const kind = failQ[1] as "recipient" | "buyer";
+    const c = claims.find((x) => x.order_id === values[0]) as Record<string, unknown> | undefined;
+    if (!c || c[`${kind}_emailed_at`]) return [];
+    if (failQ[2]) {
+      // permanent rejection
+      c[`${kind}_email_failed_at`] = new Date();
+      c[`${kind}_email_lease_until`] = null;
+      return [];
+    }
+    if (c[`${kind}_email_failed_at`]) return [];
+    const [, maxAttempts, giveUpSecs] = values as [string, number, number];
+    const paidAt = ((order as unknown as Record<string, unknown>).paid_at as Date | undefined)?.getTime() ?? clock;
+    const tooOld = paidAt < clock - Number(giveUpSecs) * 1000;
+    if (Number(c[`${kind}_email_attempts`] ?? 0) >= Number(maxAttempts) || tooOld) {
+      c[`${kind}_email_failed_at`] = new Date();
+      return [{ order_id: values[0] }];
+    }
+    return [];
+  }
   const release = /^update gift_claims set (recipient|buyer)_email_lease_until = null/.exec(q);
   if (release) {
     const kind = release[1] as "recipient" | "buyer";
     const c = claims.find((x) => x.order_id === values[0]);
-    if (c && !c[`${kind}_emailed_at`]) c[`${kind}_email_lease_until`] = null;
+    if (c && !c[`${kind}_emailed_at`]) {
+      c[`${kind}_email_lease_until`] = null;
+      if (q.includes("_email_attempts = ")) {
+        const r = c as Record<string, unknown>;
+        r[`${kind}_email_attempts`] = Number(r[`${kind}_email_attempts`] ?? 0) + 1;
+      }
+    }
     return [];
   }
   throw new Error(`Unexpected query in test double: ${q}`);
@@ -185,6 +215,7 @@ async function deliverUntil2xx(make: () => Request, max = 5): Promise<Response[]
 }
 
 beforeEach(() => {
+  vi.unstubAllEnvs();
   vi.stubEnv("STRIPE_WEBHOOK_SECRET", "whsec_test");
   vi.stubEnv("GIFT_TOKEN_SECRET", "test-gift-token-secret-0123456789abcdef");
   order = {
@@ -344,5 +375,87 @@ describe("gift webhook: crash after payment is recorded, then Stripe retries", (
     expect(claims).toHaveLength(1);
     expect(claims[0].recipient_email_lease_until).toBeNull();
     expect(mail.sendGiftEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe("gift webhook: bounded retries during a long Resend outage (QA round 6, N1)", () => {
+  test("after GIFT_EMAIL_MAX_ATTEMPTS failures it records the failure and answers 200", async () => {
+    vi.stubEnv("GIFT_EMAIL_MAX_ATTEMPTS", "3");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.sendGiftEmail.mockResolvedValue("failed"); // Resend down for good
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) statuses.push((await handleStripeWebhook(delivery())).status);
+    // attempts 1 and 2 ask Stripe to retry; the 3rd failure gives up with 200,
+    // and every later redelivery is a quiet 200 with no further send.
+    expect(statuses).toEqual([500, 500, 200, 200, 200, 200]);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(3);
+    const c = claims[0] as unknown as Record<string, unknown>;
+    expect(c.recipient_email_attempts).toBe(3);
+    expect(c.recipient_email_failed_at).toBeInstanceOf(Date);
+    expect(c.recipient_emailed_at).toBeNull();
+    expect(c.recipient_email_lease_until).toBeNull();
+    // The buyer receipt (with the link) is independent and went out once.
+    expect(claims[0].buyer_emailed_at).toBeInstanceOf(Date);
+    expect(mail.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test("defaults: 5 attempts", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.sendGiftEmail.mockResolvedValue("failed");
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) statuses.push((await handleStripeWebhook(delivery())).status);
+    expect(statuses).toEqual([500, 500, 500, 500, 200, 200]);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(5);
+  });
+
+  test("gives up once the order has been paid longer than GIFT_EMAIL_GIVE_UP_HOURS", async () => {
+    vi.stubEnv("GIFT_EMAIL_GIVE_UP_HOURS", "6");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.sendGiftEmail.mockResolvedValue("failed");
+    expect((await handleStripeWebhook(delivery())).status).toBe(500); // paid just now
+    clock = Date.now() + 7 * 3600 * 1000; // 7 h later
+    expect((await handleStripeWebhook(delivery())).status).toBe(200);
+    const c = claims[0] as unknown as Record<string, unknown>;
+    expect(c.recipient_email_attempts).toBe(2);
+    expect(c.recipient_email_failed_at).toBeInstanceOf(Date);
+  });
+
+  test("a permanent rejection is recorded at once (no retries, 200)", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.sendGiftEmail.mockResolvedValue("rejected");
+    expect((await handleStripeWebhook(delivery())).status).toBe(200);
+    expect((await handleStripeWebhook(delivery())).status).toBe(200);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(1);
+    const c = claims[0] as unknown as Record<string, unknown>;
+    expect(c.recipient_email_failed_at).toBeInstanceOf(Date);
+  });
+
+  test("a later success before the cap clears nothing it should not: sent once, never failed", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    mail.sendGiftEmail.mockResolvedValueOnce("failed").mockResolvedValueOnce("failed");
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i++) statuses.push((await handleStripeWebhook(delivery())).status);
+    expect(statuses).toEqual([500, 500, 200, 200]);
+    expect(mail.sendGiftEmail).toHaveBeenCalledTimes(3);
+    const c = claims[0] as unknown as Record<string, unknown>;
+    expect(c.recipient_emailed_at).toBeInstanceOf(Date);
+    expect(c.recipient_email_failed_at ?? null).toBeNull();
+  });
+});
+
+describe("giftEmailRetryPolicy", () => {
+  test("defaults and validation", async () => {
+    const { giftEmailRetryPolicy } = await import("~/lib/gifts");
+    expect(giftEmailRetryPolicy({})).toEqual({ maxAttempts: 5, giveUpAfterSeconds: 6 * 3600 });
+    expect(giftEmailRetryPolicy({ GIFT_EMAIL_MAX_ATTEMPTS: "8", GIFT_EMAIL_GIVE_UP_HOURS: "1.5" })).toEqual({
+      maxAttempts: 8,
+      giveUpAfterSeconds: 5400,
+    });
+    for (const bad of ["0", "-1", "abc", "1e3", "101", ""]) {
+      expect(giftEmailRetryPolicy({ GIFT_EMAIL_MAX_ATTEMPTS: bad }).maxAttempts).toBe(5);
+    }
+    for (const bad of ["0", "-2", "73", "x", "1e2"]) {
+      expect(giftEmailRetryPolicy({ GIFT_EMAIL_GIVE_UP_HOURS: bad }).giveUpAfterSeconds).toBe(6 * 3600);
+    }
   });
 });
