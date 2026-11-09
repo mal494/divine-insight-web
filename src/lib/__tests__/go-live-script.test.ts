@@ -56,4 +56,43 @@ describe("go-live.sh", () => {
     expect(code).toMatch(/Type 'apply' to continue/);
     expect(code).toMatch(/psql -X -v ON_ERROR_STOP=1/);
   });
+
+  test("env file keys are allowlisted", () => {
+    expect(code).toMatch(/ENV_FILE_ALLOWLIST=\(/);
+    expect(code).toMatch(/GO_LIVE_ENV_FILE key not allowed/);
+    const allow = /ENV_FILE_ALLOWLIST=\(([^)]*)\)/.exec(code)![1];
+    for (const dangerous of ["PATH", "BASH_ENV", "LD_PRELOAD", "NODE_OPTIONS", "GO_LIVE_"]) {
+      expect(allow).not.toContain(dangerous);
+    }
+  });
+
+  test("no silent --force: every --force follows an explicit 'overwrite' confirmation", () => {
+    const forces = [...code.matchAll(/--force/g)].map((m) => m.index!);
+    expect(forces.length).toBeGreaterThan(0);
+    const confirm = code.indexOf("Type 'overwrite' to replace them");
+    expect(confirm).toBeGreaterThan(0);
+    for (const f of forces) expect(f).toBeGreaterThan(confirm);
+    expect(code).toMatch(/GO_LIVE_SYNC_OVERWRITE/);
+    // Existing vars are skipped by default.
+    expect(code).toMatch(/skipping existing/);
+  });
+
+  test("migrations verify the target DB belongs to the project before psql runs", () => {
+    const verify = code.indexOf("same-project-db");
+    const host = code.indexOf("same-host");
+    const confirm = code.indexOf("Type 'apply' to continue");
+    const psql = code.indexOf("psql -X");
+    expect(verify).toBeGreaterThan(0);
+    expect(host).toBeGreaterThan(0);
+    expect(verify).toBeLessThan(confirm);
+    expect(confirm).toBeLessThan(psql);
+    expect(code).toMatch(/env pull "\$PULL_DIR\/project\.env" --environment "\$TARGET"/);
+    expect(code).toMatch(/trap 'rm -rf "\$PULL_DIR"' EXIT/);
+    expect(code).toMatch(/does not match \(or could not be checked against\)/);
+  });
+
+  test("the DB URL is parsed by the strict helper, not ad hoc", () => {
+    expect(code).toMatch(/PG_URL="\$DATABASE_URL_UNPOOLED" bun "\$PG_URL_HELPER" libpq-env/);
+    expect(code).not.toMatch(/new URL\(process\.env\.DATABASE_URL/);
+  });
 });

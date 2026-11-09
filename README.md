@@ -112,9 +112,13 @@ None are required to build or run the dev server. These matter at deploy time:
 - **No secrets on the command line.**
   - The CLI reads `VERCEL_TOKEN` from the environment. REST calls get the token through a curl config on stdin.
   - Runtime secrets (`DATABASE_URL`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `GIFT_FROM_EMAIL`) must already be set in the Vercel project's env for the target. The script only checks their names.
-  - `GO_LIVE_SYNC_ENV=1` uploads the ones exported in your shell, or the ones in `GO_LIVE_ENV_FILE` (a `KEY=VALUE` file that is parsed, never sourced), through stdin with `vercel env add`.
+  - `GO_LIVE_SYNC_ENV=1` uploads the ones exported in your shell, or the ones in `GO_LIVE_ENV_FILE`, through stdin with `vercel env add`. The env file is a `KEY=VALUE` file that is parsed, never sourced, and only allowlisted keys are accepted.
+  - Variables that already exist are skipped. `GO_LIVE_SYNC_OVERWRITE=1` lists them and replaces them only after you type `overwrite`.
 - **Schema first.** A production deploy refuses to start until you do one of two things:
-  - Apply named migrations with the opt-in step, `GO_LIVE_MIGRATIONS="0004_payments_schema.sql" DATABASE_URL_UNPOOLED=… bun run go-live`. It asks you to type `apply`, and the password goes to psql through libpq env vars, not argv.
+  - Apply named migrations with the opt-in step, `GO_LIVE_MIGRATIONS="0004_payments_schema.sql" DATABASE_URL_UNPOOLED=… bun run go-live`.
+    - First it proves the URL is this project's database: host (pooler suffix ignored), port and database name must match the target's `DATABASE_URL` from `vercel env pull`. If that value is sensitive and can't be pulled, it compares against `GO_LIVE_EXPECTED_DB_HOST` instead. Any mismatch aborts.
+    - The URL is strictly validated by `scripts/pg-url.mjs`: Postgres scheme, a single host, user, password and database, `sslmode` require or stricter, and no pooler host.
+    - It asks you to type `apply`. The password goes to psql through libpq env vars, not argv.
   - Or confirm you applied them yourself with `GO_LIVE_SCHEMA_CONFIRMED=1`.
 
   After the deploy it reads `/api/health/payments` when that route exists.
