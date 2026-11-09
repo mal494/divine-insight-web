@@ -20,7 +20,11 @@
  *             "url": "https://buy.stripe.com/...?client_reference_id=<uuid>" }
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { newOrderAccessToken } from "~/lib/order-access";
+import {
+  ORDER_ACCESS_MIGRATION,
+  isMissingSchemaError,
+  newOrderAccessToken,
+} from "~/lib/order-access";
 import { createOrder, isSku } from "~/lib/orders";
 import {
   PaymentLinkConfigError,
@@ -82,7 +86,11 @@ export async function handleCheckout(
     // A missing DATABASE_URL lands here. Fail loudly rather than falling
     // back to an ungated draw — the whole point of this route is that an
     // unverified purchase never unlocks anything.
-    console.error("checkout failed", err);
+    if (isMissingSchemaError(err)) {
+      console.error(`checkout unavailable: apply ${ORDER_ACCESS_MIGRATION}`, err);
+    } else {
+      console.error("checkout failed", err);
+    }
     return json({ error: "checkout_unavailable" }, 503);
   }
 }

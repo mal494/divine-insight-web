@@ -1,12 +1,20 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
-const db = vi.hoisted(() => ({ hashes: new Map<string, string | null>() }));
+const db = vi.hoisted(() => ({
+  hashes: new Map<string, string | null>(),
+  missing: null as null | string,
+}));
 
 vi.mock("~/db", () => ({
   sql:
     () =>
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const q = strings.join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+      if (db.missing)
+        throw Object.assign(new Error("schema missing"), { code: db.missing });
+      if (q.startsWith("create") || q.startsWith("alter")) {
+        throw new Error(`order access must never run DDL: ${q}`);
+      }
       if (q.startsWith("create") || q.startsWith("alter")) return [];
       if (q.startsWith("select access_token_hash from orders where id =")) {
         const id = String(values[0]);
@@ -19,8 +27,10 @@ vi.mock("~/db", () => ({
 }));
 
 import {
+  OrderSchemaMissingError,
   checkOrderAccess,
   decideOrderAccess,
+  legacyAccessOpen,
   hashOrderToken,
   isOrderToken,
   newOrderAccessToken,
@@ -57,6 +67,7 @@ describe("checkOrderAccess", () => {
   let token: string;
   beforeEach(() => {
     db.hashes.clear();
+    db.missing = null;
     const t = newOrderAccessToken();
     token = t.token;
     db.hashes.set(ORDER, t.hash);
@@ -84,5 +95,63 @@ describe("checkOrderAccess", () => {
     ).toBe("denied");
     expect(await checkOrderAccess("not-a-uuid", token)).toBe("denied");
     expect(await checkOrderAccess(`${ORDER}'--`, token)).toBe("denied");
+  });
+});
+
+describe("schema not migrated", () => {
+  test.each(["42703", "42P01"])(
+    "Postgres %s fails closed with OrderSchemaMissingError",
+    async (code) => {
+      db.missing = code;
+      await expect(
+        checkOrderAccess(ORDER, newOrderAccessToken().token),
+      ).rejects.toBeInstanceOf(OrderSchemaMissingError);
+      db.missing = null;
+    },
+  );
+});
+
+describe("LEGACY_ORDER_ACCESS_UNTIL (legacy sunset)", () => {
+  const now = new Date("2027-01-01T00:00:00Z");
+
+  test("unset or blank keeps legacy id-only access open", () => {
+    expect(legacyAccessOpen({}, now)).toBe(true);
+    expect(legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "  " }, now)).toBe(
+      true,
+    );
+  });
+
+  test("open before the cutoff, closed at and after it", () => {
+    expect(
+      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "2027-02-01" }, now),
+    ).toBe(true);
+    expect(
+      legacyAccessOpen(
+        { LEGACY_ORDER_ACCESS_UNTIL: "2027-01-01T00:00:00Z" },
+        now,
+      ),
+    ).toBe(false);
+    expect(
+      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "2026-12-01" }, now),
+    ).toBe(false);
+  });
+
+  test("an unparseable value fails closed", () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(
+      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "next spring" }, now),
+    ).toBe(false);
+  });
+
+  test("closed legacy access denies pre-token orders but not token holders", async () => {
+    db.hashes.clear();
+    db.missing = null;
+    const t = newOrderAccessToken();
+    db.hashes.set(ORDER, t.hash);
+    db.hashes.set(LEGACY, null);
+    const closed = { LEGACY_ORDER_ACCESS_UNTIL: "2000-01-01" };
+    expect(await checkOrderAccess(LEGACY, null, closed)).toBe("denied");
+    expect(await checkOrderAccess(ORDER, t.token, closed)).toBe("granted");
+    expect(decideOrderAccess(null, null, false)).toBe("denied");
   });
 });

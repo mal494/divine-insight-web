@@ -43,21 +43,27 @@ describe("resolvePaymentLink", () => {
     expect(resolvePaymentLink("singleInsight", env)).toBe(LIVE_LINK);
   });
 
-  test("PAYMENT_LINKS_MODE=live (go-live.sh deploys) behaves like production", () => {
-    for (const sku of SKU_KEYS) {
-      expect(
-        resolvePaymentLink(sku, {
-          VERCEL_ENV: "preview",
+  test("PAYMENT_LINKS_MODE=live is refused unless VERCEL_ENV=production", () => {
+    for (const vercelEnv of ["preview", "development", undefined]) {
+      for (const sku of SKU_KEYS) {
+        const env = {
+          ...(vercelEnv ? { VERCEL_ENV: vercelEnv } : {}),
           PAYMENT_LINKS_MODE: "live",
-        }),
-      ).toBe(LIVE_PAYMENT_LINK_DEFAULTS[sku]);
+          // even with a valid test link configured, the override is refused
+          [PAYMENT_LINK_ENV[sku]]: TEST_LINK,
+        };
+        expect(() => resolvePaymentLink(sku, env)).toThrow(
+          /PAYMENT_LINKS_MODE=live is refused/,
+        );
+      }
     }
-    expect(() =>
+    // In production it changes nothing: live links as before.
+    expect(
       resolvePaymentLink("singleInsight", {
-        VERCEL_ENV: "preview",
-        PAYMENT_LINKS_MODE: "test",
+        VERCEL_ENV: "production",
+        PAYMENT_LINKS_MODE: "live",
       }),
-    ).toThrow(PaymentLinkConfigError);
+    ).toBe(LIVE_PAYMENT_LINK_DEFAULTS.singleInsight);
   });
 
   test("production refuses a test-mode or non-Stripe link", () => {
@@ -120,31 +126,43 @@ describe("resolvePaymentLink", () => {
 });
 
 describe("resolveTipLinks", () => {
+  // Stand-in for the production-only live map (absent from non-prod builds).
+  const LIVE = {
+    tip3: "https://buy.stripe.com/live3",
+    tip5: "https://buy.stripe.com/live5",
+    tip10: "https://buy.stripe.com/live10",
+  };
   const testEnv = {
     VITE_STRIPE_TIP_LINK_3: "https://buy.stripe.com/test_t3",
     VITE_STRIPE_TIP_LINK_5: "https://buy.stripe.com/test_t5",
     VITE_STRIPE_TIP_LINK_10: "https://buy.stripe.com/test_t10",
   };
 
+  test("a non-production build carries no live tip links at all", () => {
+    expect(LIVE_TIP_LINKS).toBeNull();
+    expect(resolveTipLinks("production", {})).toBeNull();
+  });
+
   test("production keeps the live tip links by default", () => {
-    expect(resolveTipLinks("production", {})).toEqual(LIVE_TIP_LINKS);
+    expect(resolveTipLinks("production", {}, LIVE)).toEqual(LIVE);
   });
 
   test("production refuses test-mode tip links (hides the rail)", () => {
-    expect(resolveTipLinks("production", testEnv)).toBeNull();
+    expect(resolveTipLinks("production", testEnv, LIVE)).toBeNull();
   });
 
   test.each([["preview"], ["development"], [""], [undefined]])(
     "%s build hides tips without test links and never returns live ones",
     (deployEnv) => {
-      expect(resolveTipLinks(deployEnv, {})).toBeNull();
+      expect(resolveTipLinks(deployEnv, {}, LIVE)).toBeNull();
       expect(
-        resolveTipLinks(deployEnv, {
-          ...testEnv,
-          VITE_STRIPE_TIP_LINK_5: LIVE_TIP_LINKS.tip5,
-        }),
+        resolveTipLinks(
+          deployEnv,
+          { ...testEnv, VITE_STRIPE_TIP_LINK_5: LIVE.tip5 },
+          LIVE,
+        ),
       ).toBeNull();
-      expect(resolveTipLinks(deployEnv, testEnv)).toEqual({
+      expect(resolveTipLinks(deployEnv, testEnv, LIVE)).toEqual({
         tip3: testEnv.VITE_STRIPE_TIP_LINK_3,
         tip5: testEnv.VITE_STRIPE_TIP_LINK_5,
         tip10: testEnv.VITE_STRIPE_TIP_LINK_10,

@@ -33,20 +33,26 @@ export type Sku =
  * button opens Stripe in a new tab and the copy frames the tip as a gift,
  * never a purchase and never "pay or the site dies" pressure.
  *
- * These are the LIVE-mode tip links. They are used only by production builds
- * (see `resolveTipLinks`); preview/dev builds need test-mode links in the
- * VITE_STRIPE_TIP_LINK_* env vars or the tip rail is hidden.
+ * The LIVE-mode tip links exist only in production builds: the literal URLs
+ * sit behind a build-time constant (VITE_DEPLOY_ENV, set from VERCEL_ENV in
+ * vite.config.ts), so preview/dev bundles don't contain them at all. Those
+ * builds need test-mode links in VITE_STRIPE_TIP_LINK_* or the rail is hidden.
  */
-export const LIVE_TIP_LINKS = {
-  /** Leave a Tip — USD 3.00. */
-  tip3: "https://buy.stripe.com/aFadR93ejcxg2JF3S9es006",
-  /** Leave a Tip — USD 5.00. */
-  tip5: "https://buy.stripe.com/bJe7sLeX11SC0BxewNes004",
-  /** Leave a Tip — USD 10.00. */
-  tip10: "https://buy.stripe.com/00w9ATdSXfJsckf9ctes005",
-} as const;
+export type TipKey = "tip3" | "tip5" | "tip10";
 
-export type TipKey = keyof typeof LIVE_TIP_LINKS;
+export const LIVE_TIP_LINKS: Record<TipKey, string> | null =
+  import.meta.env.VITE_DEPLOY_ENV === "production"
+    ? {
+        /** Leave a Tip — USD 3.00. */
+        tip3: "https://buy.stripe.com/aFadR93ejcxg2JF3S9es006",
+        /** Leave a Tip — USD 5.00. */
+        tip5: "https://buy.stripe.com/bJe7sLeX11SC0BxewNes004",
+        /** Leave a Tip — USD 10.00. */
+        tip10: "https://buy.stripe.com/00w9ATdSXfJsckf9ctes005",
+      }
+    : null;
+
+const TIP_KEYS: readonly TipKey[] = ["tip3", "tip5", "tip10"];
 
 /** Build-time env var names for per-environment tip links. */
 export const TIP_LINK_ENV: Record<TipKey, string> = {
@@ -85,14 +91,16 @@ export function isTestModePaymentLink(value: string): boolean {
 export function resolveTipLinks(
   deployEnv: string | undefined,
   env: Record<string, string | undefined>,
+  live: Record<TipKey, string> | null = LIVE_TIP_LINKS,
 ): Record<TipKey, string> | null {
   const production = deployEnv === "production";
   const out = {} as Record<TipKey, string>;
-  for (const key of Object.keys(LIVE_TIP_LINKS) as TipKey[]) {
+  for (const key of TIP_KEYS) {
     const raw = env[TIP_LINK_ENV[key]]?.trim();
     if (production) {
       if (!raw) {
-        out[key] = LIVE_TIP_LINKS[key];
+        if (!live) return null;
+        out[key] = live[key];
       } else if (isStripePaymentLink(raw) && !isTestModePaymentLink(raw)) {
         out[key] = raw;
       } else {

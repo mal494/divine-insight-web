@@ -96,9 +96,9 @@ The four one-time SKUs open Stripe Payment Links chosen on the server by
 | `STRIPE_PAYMENT_LINK_READING_BUNDLE` | `readingBundle` | 19.99 USD |
 | `STRIPE_PAYMENT_LINK_GIFT_READING` | `giftReading` | 5.00 USD |
 
-- **Production** (`VERCEL_ENV=production`, or `PAYMENT_LINKS_MODE=live`, which
-  `go-live.sh` sets because its `vercel deploy` is a Preview-type deployment):
-  the env var if set (must be a
+- **Production** (`VERCEL_ENV=production` only; `PAYMENT_LINKS_MODE=live`
+  anywhere else is refused with a 503, and `go-live.sh`'s non-`--prod` deploy
+  counts as a preview): the env var if set (must be a
   live-mode `https://buy.stripe.com/…` link), otherwise the existing live link
   baked into `LIVE_PAYMENT_LINK_DEFAULTS`.
 - **Preview, development, local**: the env var is required and must be a

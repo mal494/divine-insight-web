@@ -4,9 +4,7 @@
  * Before this module the four links were hardcoded LIVE-mode URLs shipped to
  * every environment, so a Vercel Preview sent testers to real checkout. Now:
  *
- *   - Production (VERCEL_ENV=production, or PAYMENT_LINKS_MODE=live, which
- *     go-live.sh sets because its `vercel deploy` runs as a Preview-type
- *     deployment): STRIPE_PAYMENT_LINK_<SKU> if set,
+ *   - Production (VERCEL_ENV=production, and only that): STRIPE_PAYMENT_LINK_<SKU> if set,
  *     which must be a live-mode https://buy.stripe.com/… link; otherwise the
  *     current live link below (so production keeps working with no config).
  *   - Everything else (preview, development, local, tests): the env var MUST be
@@ -53,7 +51,7 @@ export class PaymentLinkConfigError extends Error {
 type Env = Record<string, string | undefined>;
 
 export function isProductionDeploy(env: Env = process.env): boolean {
-  return env.VERCEL_ENV === "production" || env.PAYMENT_LINKS_MODE === "live";
+  return env.VERCEL_ENV === "production";
 }
 
 /** Resolve the Stripe link for a SKU, or throw PaymentLinkConfigError. */
@@ -77,6 +75,14 @@ export function resolvePaymentLink(sku: Sku, env: Env = process.env): string {
   }
 
   const where = env.VERCEL_ENV ?? "development";
+  // There is deliberately no override that turns live links on outside
+  // production. A leftover PAYMENT_LINKS_MODE=live is refused loudly rather
+  // than ignored, so nobody believes a preview is selling for real.
+  if (env.PAYMENT_LINKS_MODE?.trim().toLowerCase() === "live") {
+    throw new PaymentLinkConfigError(
+      `PAYMENT_LINKS_MODE=live is refused outside VERCEL_ENV=production (VERCEL_ENV=${where}); live Stripe links only run in production`,
+    );
+  }
   if (!raw) {
     throw new PaymentLinkConfigError(
       `${name} is not set. ${where} never uses live Stripe links; set it to a TEST-mode Payment Link (https://buy.stripe.com/test_…)`,

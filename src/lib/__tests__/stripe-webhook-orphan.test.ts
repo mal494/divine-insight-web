@@ -15,6 +15,7 @@ const m = vi.hoisted(() => ({
   claimUrlFor: vi.fn(),
   rows: new Map<string, unknown[]>(),
   failDb: false,
+  missingTable: false,
 }));
 
 vi.mock("~/lib/stripe-signature", () => ({
@@ -36,7 +37,16 @@ vi.mock("~/db", () => ({
     async (strings: TemplateStringsArray, ...v: unknown[]) => {
       if (m.failDb) throw new Error("db down");
       const q = strings.join(" ").replace(/\s+/g, " ").trim().toLowerCase();
-      if (q.startsWith("create table")) return [];
+      if (q.startsWith("create"))
+        throw new Error(`webhook must not run DDL: ${q}`);
+      if (m.missingTable) {
+        throw Object.assign(
+          new Error('relation "orphan_payments" does not exist'),
+          {
+            code: "42P01",
+          },
+        );
+      }
       if (q.startsWith("insert into orphan_payments")) {
         const id = String(v[0]);
         if (m.rows.has(id)) return [];
@@ -81,6 +91,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   m.rows.clear();
   m.failDb = false;
+  m.missingTable = false;
   process.env.STRIPE_WEBHOOK_SECRET = "whsec_test";
   m.verifyStripeSignature.mockResolvedValue({ ok: true });
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -127,6 +138,12 @@ describe("paid sessions that cannot be fulfilled", () => {
 
   test("if the record cannot be written, answer 500 so Stripe retries", async () => {
     m.failDb = true;
+    const res = await handleStripeWebhook(req(directGiftLinkEvent()));
+    expect(res.status).toBe(500);
+  });
+
+  test("before migration 0004 (no orphan_payments table) the webhook answers 500 so Stripe retries", async () => {
+    m.missingTable = true;
     const res = await handleStripeWebhook(req(directGiftLinkEvent()));
     expect(res.status).toBe(500);
   });

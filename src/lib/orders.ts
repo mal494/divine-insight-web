@@ -69,11 +69,23 @@ export type Order = {
 };
 
 /**
- * Create the tables on first use. Cheap enough to call per request (every
- * statement is `if not exists`) and it keeps the site deployable without a
- * separate migration step, which this template has no runner for.
+ * Create the original tables on first use (every statement is `if not
+ * exists`), at most once per server process. New columns/tables go in
+ * migrations/ instead, applied before deploy.
  */
 export async function ensureSchema(): Promise<void> {
+  // Once per process: even a no-op `add column if not exists` takes an
+  // ACCESS EXCLUSIVE lock on orders, so never run it on every request.
+  schemaReady ??= bootstrapSchema().catch((err: unknown) => {
+    schemaReady = null;
+    throw err;
+  });
+  return schemaReady;
+}
+
+let schemaReady: Promise<void> | null = null;
+
+async function bootstrapSchema(): Promise<void> {
   const db = sql();
   await db`
     create table if not exists orders (
@@ -94,11 +106,9 @@ export async function ensureSchema(): Promise<void> {
   await db`
     alter table orders
       add column if not exists amount_currency text not null default 'usd'`;
-  // SHA-256 of the per-order access token handed to the buyer at checkout
-  // (see ~/lib/order-access). Null for orders created before tokens existed.
-  await db`
-    alter table orders
-      add column if not exists access_token_hash text`;
+  // orders.access_token_hash (see ~/lib/order-access) is NOT added here: it
+  // comes from migrations/0004_order_access_and_orphans.sql, so no request
+  // ever runs that DDL. Without it, checkout and order access fail closed (503).
   await db`
     create table if not exists readings (
       id          uuid primary key,
@@ -310,7 +320,7 @@ export async function listReadings(
   });
 }
 
-export function isUuid(value: string): boolean {
+function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     value,
   );

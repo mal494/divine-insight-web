@@ -23,6 +23,8 @@ const db = vi.hoisted(() => ({
     payload: unknown;
     created_at: string;
   }[],
+  /** Simulate migrations/0004 not applied: orders.access_token_hash missing. */
+  noAccessColumn: false,
 }));
 
 vi.mock("~/db", () => ({
@@ -30,7 +32,18 @@ vi.mock("~/db", () => ({
     () =>
     async (strings: TemplateStringsArray, ...v: unknown[]) => {
       const q = strings.join(" ").replace(/\s+/g, " ").trim().toLowerCase();
+      if (q.startsWith("alter") && q.includes("access_token_hash")) {
+        throw new Error("runtime DDL for access_token_hash must not happen");
+      }
       if (q.startsWith("create") || q.startsWith("alter")) return [];
+      if (db.noAccessColumn && q.includes("access_token_hash")) {
+        throw Object.assign(
+          new Error('column "access_token_hash" does not exist'),
+          {
+            code: "42703",
+          },
+        );
+      }
       if (q.startsWith("insert into orders")) {
         const [id, sku, credits, amount, currency, , , , hash] = v;
         if (credits === undefined || credits === null)
@@ -147,6 +160,8 @@ function markPaidInDb(id: string) {
 }
 
 beforeEach(() => {
+  db.noAccessColumn = false;
+  delete process.env.LEGACY_ORDER_ACCESS_UNTIL;
   db.orders.clear();
   db.readings.length = 0;
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -307,5 +322,53 @@ describe("order access control", () => {
     );
     expect(res.headers.get("cache-control")).toBe("no-store");
     expect(res.headers.get("vary")).toBe("x-order-token");
+  });
+});
+
+describe("migration 0004 not applied", () => {
+  test("checkout, order status and reading spend all fail closed with 503", async () => {
+    const { orderId, accessToken } = await buy("singleInsight");
+    markPaidInDb(orderId);
+    db.noAccessColumn = true;
+
+    const checkout = await handleCheckout(
+      checkoutRequest({ sku: "singleInsight" }),
+      PREVIEW_ENV,
+    );
+    expect(checkout.status).toBe(503);
+
+    for (const token of [accessToken, null]) {
+      const status = await handleOrderGet(
+        orderId,
+        orderRequest(orderId, token, true),
+      );
+      expect(status.status).toBe(503);
+      const spend = await handleReadingPost(readingRequest(orderId, token));
+      expect(spend.status).toBe(503);
+    }
+    expect(db.orders.get(orderId)?.credits).toBe(1);
+  });
+});
+
+describe("legacy sunset via LEGACY_ORDER_ACCESS_UNTIL", () => {
+  test("after the cutoff, id-only access to a pre-token order is refused", async () => {
+    const legacyId = "66666666-6666-4666-8666-666666666666";
+    db.orders.set(legacyId, {
+      id: legacyId,
+      sku: "singleInsight",
+      status: "paid",
+      credits: 1,
+      amount_cents: 299,
+      amount_currency: "usd",
+      access_token_hash: null,
+    });
+    process.env.LEGACY_ORDER_ACCESS_UNTIL = "2000-01-01T00:00:00Z";
+    expect(
+      (await handleOrderGet(legacyId, orderRequest(legacyId, null))).status,
+    ).toBe(404);
+    expect(
+      (await handleReadingPost(readingRequest(legacyId, null))).status,
+    ).toBe(402);
+    expect(db.orders.get(legacyId)?.credits).toBe(1);
   });
 });

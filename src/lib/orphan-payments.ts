@@ -10,8 +10,9 @@
  * Product policy (PM, Nov 9): problem gifts go to support for a manual reissue
  * or refund; nothing is refunded automatically. So the webhook never silently
  * drops such a payment: it records it here (idempotent on the session id) and
- * logs an ORPHAN_PAYMENT line. If the write fails, the webhook answers 500 so
- * Stripe retries until the record lands.
+ * logs an ORPHAN_PAYMENT line. If the write fails (including the table not
+ * existing yet: it comes from migrations/0004_order_access_and_orphans.sql),
+ * the webhook answers 500 so Stripe retries until the record lands.
  *
  * Support query:  select * from orphan_payments order by created_at desc;
  */
@@ -38,20 +39,6 @@ export type OrphanPayment = {
 /** Record an unfulfilled paid session. Returns false when it was already recorded. */
 export async function recordOrphanPayment(p: OrphanPayment): Promise<boolean> {
   const db = sql();
-  await db`
-    create table if not exists orphan_payments (
-      stripe_session_id      text primary key,
-      stripe_event_id        text not null,
-      reason                 text not null,
-      order_ref              text,
-      stripe_payment_link    text,
-      stripe_payment_intent  text,
-      amount_cents           integer,
-      currency               text,
-      customer_email         text,
-      created_at             timestamptz not null default now(),
-      resolved_at            timestamptz
-    )`;
   const inserted = await db`
     insert into orphan_payments (
       stripe_session_id, stripe_event_id, reason, order_ref, stripe_payment_link,

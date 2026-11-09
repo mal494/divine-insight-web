@@ -8,9 +8,6 @@
 #   RESEND_API_KEY (required for gift delivery) — Resend API key.
 #   GIFT_FROM_EMAIL (required for gift delivery) — verified sender email for gift messages.
 #   PUBLIC_SITE_URL (optional) — used in gift claim links when set.
-#   PAYMENT_LINKS_MODE — forced to "live" here: this script publishes the real
-#                  site, but `vercel deploy` without --prod runs as a Preview,
-#                  where checkout otherwise refuses live Stripe links.
 #   VERCEL_SCOPE   (optional) — team slug; auto-resolved from the token if unset.
 #   VERCEL_TEAM_ID (optional) — team id; auto-resolved from the token if unset.
 #
@@ -61,10 +58,6 @@ if [ -z "${VERCEL_SCOPE:-}" ] || [ -z "${VERCEL_TEAM_ID:-}" ]; then
   [ "$RESOLVED" != "${RESOLVED#* }" ] && VERCEL_SCOPE="${VERCEL_SCOPE:-${RESOLVED##* }}"
 fi
 
-# Live Stripe links for both the server (runtime env below) and the client
-# tip rail (build time). See src/lib/payment-links.ts.
-export PAYMENT_LINKS_MODE=live
-
 echo "==> building Vercel bundle"
 bash ./build-vercel.sh
 
@@ -76,7 +69,6 @@ ENV_ARGS+=(
   -e "STRIPE_WEBHOOK_SECRET=$STRIPE_WEBHOOK_SECRET"
   -e "RESEND_API_KEY=$RESEND_API_KEY"
   -e "GIFT_FROM_EMAIL=$GIFT_FROM_EMAIL"
-  -e "PAYMENT_LINKS_MODE=live"
 )
 if [ -n "${PUBLIC_SITE_URL:-}" ]; then ENV_ARGS+=(-e "PUBLIC_SITE_URL=$PUBLIC_SITE_URL"); fi
 
