@@ -106,8 +106,9 @@ cannot silently go out without payment/gift-email configuration. `DATABASE_URL`
 is forwarded the same way when it is set. A local `.env` is not read by the
 deploy; export the variables in the shell that runs `bun run go-live`.
 
-Pro does not read an env var. Its publishable key and price id are the
-placeholder constants in `src/lib/stripe-checkout.ts`.
+Pro UI visibility is controlled by the client build flag `VITE_PRO_UI_ENABLED`
+(default off; only `"true"` enables it). With it off, Pro stays hidden and
+`/api/pro/status` is never called. See PAYMENTS.md, "Where the flag lives".
 
 Create a local `.env` (gitignored) if you need any of these during development:
 
@@ -133,7 +134,9 @@ psql "$DATABASE_URL_UNPOOLED" -f migrations/0001_pro_auth.sql
 ```
 
 `hasPro(userId)` in `src/lib/auth/entitlements.ts` reads the `entitlements`
-table. Nothing writes to it yet, so it returns false; Pro stays hidden.
+table (written by the Pro subscription webhook). `GET /api/pro/status` exposes
+it to the signed-in user, and `requirePro()` in `src/lib/auth/require-pro.ts`
+enforces it on Pro-only API routes (401 signed out, 403 not Pro).
 Node 22 is pinned (`engines`, `.nvmrc`).
 
 ## Gemini proxy contract (Android)
@@ -183,7 +186,7 @@ src/
     api/           # checkout, stripe-webhook, order, reading
   components/      # card-face, reading-panel, pricing, PremiumGate, Journal, …
   context/
-    SubscriptionContext.tsx  # Pro flag; production always off, dev localStorage only
+    SubscriptionContext.tsx  # Pro status from /api/pro/status behind VITE_PRO_UI_ENABLED (default off); dev localStorage override
   data/
     deck.generated.ts   # GENERATED — do not hand-edit (see CORE.md)
     deck.ts             # deck accessors
