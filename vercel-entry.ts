@@ -11,6 +11,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import handler from "./dist/server/server.js";
+import { claimPrivacyHeaders } from "./src/lib/claim-privacy";
 
 const fetchHandler = handler as {
   fetch: (request: Request) => Response | Promise<Response>;
@@ -39,9 +40,16 @@ export default async function vercelHandler(
   res: ServerResponse
 ): Promise<void> {
   try {
-    const webRes = await fetchHandler.fetch(toWebRequest(req));
+    const webReq = toWebRequest(req);
+    const webRes = await fetchHandler.fetch(webReq);
     res.statusCode = webRes.status;
     webRes.headers.forEach((value, key) => res.setHeader(key, value));
+    // Gift claim URLs carry a bearer token: never leak them via Referer.
+    for (const [key, value] of Object.entries(
+      claimPrivacyHeaders(new URL(webReq.url).pathname),
+    )) {
+      res.setHeader(key, value);
+    }
     if (webRes.body) {
       const reader = webRes.body.getReader();
       for (;;) {

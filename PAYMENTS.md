@@ -39,10 +39,141 @@ scrolled past the CTA.
 
 A gift is the one SKU with something to deliver, so it has an extra leg:
 
-1. Checkout captures the recipient's email, the sender's name, and an optional
-   note, and stores them on the order.
-2. When the webhook marks a gift order paid, it mints a single-use claim token
-   (`gift_claims`) and emails the recipient a link to `/claim/<token>`.
+1. Checkout requires a valid recipient email (checked in the form and again in
+   `/api/checkout`, which answers 400 `invalid_recipient_email`), plus the
+   sender's name and an optional note, and stores them on the order.
+2. When the webhook sees a gift order paid, it ALWAYS mints the single-use
+   claim token (`gift_claims`), with or without a recipient email. Minting is
+   idempotent; if it fails the webhook answers 500 so Stripe retries. The call
+   that creates the token emails the recipient a link to `/claim/<token>` (when
+   there is an address) and sends the buyer a gift receipt carrying the same
+   link ("Share this link with the person you're gifting").
+   The buyer is also always shown the link on the gift confirmation view:
+   `/api/order/<id>` returns `claimUrl` for a paid gift once the webhook has
+   minted it. That route is read-only and never mints; the webhook is the only
+   minter. Gift emails are delivered **at least once until recorded, then
+   never again** (migration `0005_gift_claim_email_flags.sql`, apply before
+   deploy):
+   - A delivery takes a short send lease (`*_email_lease_until`, 120 s).
+     `*_emailed_at` is set only after Resend accepted the email.
+   - A transient failure releases the lease, counts an attempt
+     (`*_email_attempts`) and the webhook answers 500, so Stripe retries.
+     Transient means: network error, timeout, 5xx, 429, 408, 401/403 (a wrong
+     or restricted `RESEND_API_KEY` or an unverified sender domain), and every
+     409 except `invalid_idempotent_request` (`concurrent_idempotent_requests`,
+     `resource_locked`, unknown or unparseable). The cap below bounds all of
+     them, so a misclassification costs a few retries, never a loop.
+   - Only the lease holder can release a lease: `reserveGiftEmail` returns the
+     exact `*_email_lease_until` it wrote as a fencing token, and every release
+     matches on it. A delivery that stalled past its lease and was overtaken
+     cannot clear the new holder's lease or count an attempt.
+   - Retries are bounded: after `GIFT_EMAIL_MAX_ATTEMPTS` failed sends
+     (default 5) or once the order has been paid for longer than
+     `GIFT_EMAIL_GIVE_UP_HOURS` (default 6), `*_email_failed_at` is set, the
+     failure is logged ("gift email retries exhausted"), and the webhook answers
+     200. A long Resend outage therefore never gets the Stripe endpoint
+     disabled. The buyer still sees the claim link on the confirmation view.
+     Support can list stuck emails with `select order_id from gift_claims where
+     recipient_email_failed_at is not null or buyer_email_failed_at is not null`.
+   - **Recovering emails that gave up** (e.g. after fixing a wrong
+     `RESEND_API_KEY`, an unverified domain, or after an outage). This is a
+     production write, so get the owner's OK first:
+     1. Fix the configuration (env vars, then **redeploy**: Vercel env changes
+        only reach a new deployment). Confirm it with **one real gift order,
+        placed only with Michael's OK**. Do not use a preview test: previews
+        share the production database, so a "test" gift there is a real row.
+     2. List the affected orders and count them per kind (read-only):
+        ```sql
+        select order_id,
+               recipient_email_failed_at is not null and recipient_emailed_at is null as recipient_stuck,
+               buyer_email_failed_at     is not null and buyer_emailed_at     is null as buyer_stuck
+          from gift_claims
+         where (recipient_email_failed_at is not null and recipient_emailed_at is null)
+            or (buyer_email_failed_at     is not null and buyer_emailed_at     is null);
+        ```
+        Note the order ids and the two counts.
+     3. Reset exactly those rows, in one transaction with an explicit `uuid[]`
+        and a row-count check. If either count differs, the DO block raises and
+        the whole transaction rolls back. Save it as `reset.sql` and run it
+        with `psql -X -v ON_ERROR_STOP=1 -f reset.sql` (credentials from
+        `PGSERVICE` / `~/.pgpass`, never in the command line):
+        ```sql
+        \set ON_ERROR_STOP on
+        BEGIN;
+        DO $$
+        DECLARE
+          -- paste the ids from step 2; nothing else to edit except the counts
+          ids uuid[] := '{11111111-1111-4111-8111-111111111111}'::uuid[];
+          expected_recipient int := 1;   -- recipient_stuck count from step 2
+          expected_buyer     int := 0;   -- buyer_stuck count from step 2
+          n int;
+        BEGIN
+          UPDATE gift_claims
+             SET recipient_email_failed_at = NULL, recipient_email_attempts = 0,
+                 recipient_email_lease_until = NULL
+           WHERE order_id = ANY (ids)
+             AND recipient_emailed_at IS NULL
+             AND recipient_email_failed_at IS NOT NULL;
+          GET DIAGNOSTICS n = ROW_COUNT;
+          IF n <> expected_recipient THEN
+            RAISE EXCEPTION 'recipient reset: expected % rows, got %', expected_recipient, n;
+          END IF;
+          UPDATE gift_claims
+             SET buyer_email_failed_at = NULL, buyer_email_attempts = 0,
+                 buyer_email_lease_until = NULL
+           WHERE order_id = ANY (ids)
+             AND buyer_emailed_at IS NULL
+             AND buyer_email_failed_at IS NOT NULL;
+          GET DIAGNOSTICS n = ROW_COUNT;
+          IF n <> expected_buyer THEN
+            RAISE EXCEPTION 'buyer reset: expected % rows, got %', expected_buyer, n;
+          END IF;
+        END $$;
+        COMMIT;
+        ```
+        **Confirm the output ends with `COMMIT`** (after `BEGIN` and `DO`) and
+        psql exits 0. Anything else (an `ERROR:` line such as `recipient reset:
+        expected 2 rows, got 1`, a non-zero exit, or a final `ROLLBACK`) means
+        nothing was changed: re-run step 2 and fix the ids or counts. Never
+        finish a half-applied reset by hand.
+     4. Re-run delivery by resending each order's `checkout.session.completed`
+        event from Stripe (Dashboard → Developers → Events → Resend, events up
+        to 15 days old; `stripe events resend <evt_id>` up to 30 days). The
+        webhook sees the order as already paid and only sends the missing
+        emails. Each resend counts against the age cap from `paid_at`, so for
+        orders older than the cap raise `GIFT_EMAIL_GIVE_UP_HOURS` (max 72)
+        first. That is an env change and **needs a redeploy** before the
+        resends, and another one to put it back afterwards. Otherwise the first
+        failure gives up again (a successful send is unaffected).
+     5. Check `*_emailed_at` is now set for those rows. Orders past Stripe's
+        resend window need a hand-sent email with the claim link from the
+        buyer's confirmation view (see the make-whole plan).
+   - Each Resend call has a 12 s timeout (AbortController); a timeout counts as
+     a transient failure.
+   - A crash mid-send leaves only the lease. It expires and a later retry sends.
+     While a lease is held, other deliveries answer 500 rather than send twice.
+   - Every send carries a Resend `Idempotency-Key` (`gift-<kind>-<orderId>`), so
+     the narrow "accepted but not yet recorded" crash is de-duplicated by Resend.
+   - A permanent 4xx (e.g. an invalid address), including Resend's 409
+     `invalid_idempotent_request` (key reused with a different body), is logged,
+     recorded in `*_email_failed_at`, and not retried. The request body is
+     built deterministically from the order, so a retry under the same key is
+     byte-identical and should never hit that 409.
+   - If `RESEND_API_KEY` / `GIFT_FROM_EMAIL` are unset, emails are skipped with a
+     2xx, because a retry can't fix configuration. The buyer still sees the link.
+   - **Accepted risk (N4):** Resend keeps an `Idempotency-Key` for 24 h. If a
+     send was accepted but the process died before `*_emailed_at` was written,
+     and the next attempt comes more than 24 h later, the email can go out
+     twice. With the 6 h give-up default that only happens if
+     `GIFT_EMAIL_GIVE_UP_HOURS` is raised past 24 or support re-sends by hand;
+     a duplicate gift email is harmless (same link).
+   - **Accepted risk (N5):** if `RESEND_API_KEY` / `GIFT_FROM_EMAIL` are unset,
+     no gift email is sent and nothing is recorded for a later re-send.
+     `go-live.sh` refuses to deploy without them, and the buyer still sees the
+     link to forward by hand.
+   - Without 0005 the webhook answers 500 for paid gifts after minting (Stripe
+     retries), and `GET /api/health/payments` lists the missing 0005 columns. Gifts with no recipient email are logged
+   (order id only, never the token) for support.
 3. The recipient opens the link, turns one card, and that POST burns the token,
    spends the credit, and stores the reading.
 4. Re-opening the link shows the same card again rather than drawing a new one,
@@ -63,6 +194,8 @@ over an email problem.
 | `STRIPE_WEBHOOK_SECRET` | Stripe Dashboard, Developers, Webhooks, your endpoint, Signing secret (`whsec_...`). |
 | `RESEND_API_KEY` | Resend dashboard. Only needed for Gift Readings. |
 | `GIFT_FROM_EMAIL` | A sender verified in Resend, e.g. `Divine Insight <readings@yourdomain>`. |
+| `GIFT_EMAIL_MAX_ATTEMPTS` | Optional. Failed gift-email sends before giving up (integer 1-100, default 5). |
+| `GIFT_EMAIL_GIVE_UP_HOURS` | Optional. Stop retrying gift emails this many hours after payment (0-72, default 6). |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
 
 `go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
@@ -74,8 +207,25 @@ no order ever becomes paid. That is the intended failure direction: a
 misconfigured site sells nothing rather than giving everything away.
 
 Without `RESEND_API_KEY` and `GIFT_FROM_EMAIL`, gift orders still complete and
-are still claimable - the email just never goes out, and the failure is logged.
+are still claimable - the emails just never go out, the failure is logged, and
+the buyer can still copy the link from the confirmation view.
 Set both before selling gifts.
+
+Paid gift orders created before every paid gift got a token are backfilled
+with `scripts/backfills/2026-11-gift-claim-tokens.sql` (idempotent, run by
+hand). It mints the legacy plaintext token format, so run it BEFORE the
+hashed-token change and its hashing backfill, never after (see that script).
+
+Claim URLs are bearer credentials: `/claim/*` and `/api/claim/*` responses get
+`Referrer-Policy: no-referrer` (set in vercel-entry.ts / serve.ts, plus a meta
+tag on the page), the analytics loader never runs on a claim path, and no log
+line includes a token. Claiming is one atomic SQL statement (burn + credit +
+reading).
+
+The buyer's `claimUrl` is only returned by `/api/order/<id>` past the
+per-order `x-order-token` check, so the order id alone does not reveal it.
+A purchase made straight from a Stripe Payment Link (no `client_reference_id`)
+has no order or recipient; it is recorded in `orphan_payments` for support.
 
 **A webhook endpoint in Stripe**
 

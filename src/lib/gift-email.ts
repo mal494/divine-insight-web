@@ -1,64 +1,244 @@
 /**
- * gift-email.ts — sends the "someone sent you a reading" email.
+ * gift-email.ts — sends the "someone sent you a reading" email to the
+ * recipient, and the gift receipt (with the shareable claim link) to the buyer.
  *
  * Uses Resend's HTTP API directly over fetch: one POST, no SDK, nothing added
  * to the bundle. Swapping providers later means changing this one function.
  *
  * Configuration:
- *   RESEND_API_KEY  — required. Without it nothing is sent and the failure is
- *                     logged, never thrown: a gift that was paid for must not
- *                     fail the webhook, or Stripe will retry the payment event
- *                     for days over an email problem.
+ *   RESEND_API_KEY  — required. Without it nothing is sent ("not-configured");
+ *                     the webhook then skips gift emails and answers 2xx (a
+ *                     retry cannot fix configuration; the buyer still sees
+ *                     the claim link).
+ *
+ * Results (never thrown):
+ *   "sent"           — Resend accepted it.
+ *   "failed"         — transient (network error, timeout, 5xx, 408, 429,
+ *                      401/403, or any 409 other than
+ *                      `invalid_idempotent_request`): the webhook
+ *                      answers non-2xx so Stripe retries (bounded: see
+ *                      GIFT_EMAIL_MAX_ATTEMPTS / GIFT_EMAIL_GIVE_UP_HOURS in
+ *                      ~/lib/gifts).
+ *   "rejected"       — other 4xx (e.g. 422 invalid address), and a 409
+ *                      `invalid_idempotent_request` (key reused with a
+ *                      different body; retrying can never succeed): logged,
+ *                      not retried.
+ * Every Resend call is bounded by RESEND_TIMEOUT_MS (AbortController), so a
+ * hung connection becomes "failed" instead of eating the function's budget.
+ *   "not-configured" — see above.
+ * Each send carries an Idempotency-Key (order + kind), so if a process dies
+ * after Resend accepted the email but before we recorded it, the retry's
+ * resend is de-duplicated by Resend (24 h window).
  *   GIFT_FROM_EMAIL — the verified sender, e.g. "Divine Insight <readings@yourdomain>".
  *   PUBLIC_SITE_URL — origin used to build the claim link.
  *
  * Server-only.
  */
+import { SHARE_CLAIM_LINK_COPY } from "~/lib/gift-validation";
 
-export type GiftEmailInput = {
-  to: string;
-  senderName: string | null;
-  note: string | null;
-  claimUrl: string;
+export type GiftSendResult = "sent" | "failed" | "rejected" | "not-configured";
+
+/** True when gift emails can be sent at all (both settings present). */
+export function giftEmailConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY && process.env.GIFT_FROM_EMAIL);
+}
+
+/** Hard cap on one Resend request (connect + response). */
+export const RESEND_TIMEOUT_MS = 12_000;
+
+/**
+ * Map a Resend response to a result. "failed" is retried, but only within the
+ * attempt/age cap (GIFT_EMAIL_MAX_ATTEMPTS / GIFT_EMAIL_GIVE_UP_HOURS), so a
+ * wrong guess here costs a few retries, never an endless loop.
+ *   - 409 `invalid_idempotent_request` (same key, different payload) can never
+ *     succeed on retry: "rejected". Every other 409 (`concurrent_idempotent_
+ *     requests`, `resource_locked`, unknown or unparseable) is "failed".
+ *   - 401 / 403 usually mean a wrong or restricted RESEND_API_KEY or an
+ *     unverified sender domain: configuration, not the email. "failed", so
+ *     fixing the key within the cap still delivers (see PAYMENTS.md for
+ *     recovering rows that already gave up).
+ *   - 408 / 429 / 5xx: "failed". Any other 4xx (e.g. 422 invalid address):
+ *     "rejected".
+ */
+export function classifyResend(status: number, errorName?: string | null): GiftSendResult {
+  if (status >= 200 && status < 300) return "sent";
+  if (status === 409) {
+    return errorName === "invalid_idempotent_request" ? "rejected" : "failed";
+  }
+  if (status === 401 || status === 403) return "failed";
+  if (status === 408 || status === 429 || status >= 500) return "failed";
+  return "rejected";
+}
+
+type ResendPayload = {
+  from: string;
+  to: string[];
+  subject: string;
+  text: string;
+  html: string;
 };
 
-export async function sendGiftEmail(input: GiftEmailInput): Promise<boolean> {
-  const apiKey = process.env.RESEND_API_KEY;
-  const from = process.env.GIFT_FROM_EMAIL;
-  if (!apiKey || !from) {
-    console.error(
-      "gift email not sent — RESEND_API_KEY and GIFT_FROM_EMAIL must both be set",
-    );
-    return false;
-  }
-
-  const sender = input.senderName?.trim() || "Someone";
-  const subject = `${sender} sent you a tarot reading`;
-
+/**
+ * POST one email to Resend with a timeout. Never throws. The payload is a pure
+ * function of its inputs (no timestamps or random ids), so a retry with the
+ * same Idempotency-Key sends a byte-identical body.
+ */
+async function postToResend(
+  apiKey: string,
+  payload: ResendPayload,
+  idempotencyKey: string | undefined,
+  label: string,
+): Promise<GiftSendResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
+        ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
       },
-      body: JSON.stringify({
-        from,
-        to: [input.to],
-        subject,
-        text: plainText(sender, input.note, input.claimUrl),
-        html: html(sender, input.note, input.claimUrl),
-      }),
+      body: JSON.stringify(payload),
+      signal: controller.signal,
     });
-    if (!res.ok) {
-      console.error("gift email rejected:", res.status, await res.text());
-      return false;
+    if (res.status >= 200 && res.status < 300) return "sent";
+    const detail = await res.text().catch(() => "");
+    let errorName: string | null = null;
+    try {
+      errorName = (JSON.parse(detail) as { name?: unknown })?.name as string | null;
+    } catch {
+      errorName = null;
     }
-    return true;
+    const result = classifyResend(res.status, typeof errorName === "string" ? errorName : null);
+    console.error(`${label} ${result}:`, res.status, errorName ?? "", detail.slice(0, 300));
+    return result;
   } catch (err) {
-    console.error("gift email failed to send", err);
-    return false;
+    const timedOut = controller.signal.aborted;
+    console.error(`${label} failed to send${timedOut ? ` (timed out after ${RESEND_TIMEOUT_MS} ms)` : ""}`, timedOut ? "" : err);
+    return "failed";
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+export type GiftEmailInput = {
+  /** Resend Idempotency-Key, e.g. "gift-recipient-<orderId>". */
+  idempotencyKey?: string;
+  to: string;
+  senderName: string | null;
+  note: string | null;
+  claimUrl: string;
+};
+
+export async function sendGiftEmail(input: GiftEmailInput): Promise<GiftSendResult> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.GIFT_FROM_EMAIL;
+  if (!apiKey || !from) {
+    console.error(
+      "gift email not sent — RESEND_API_KEY and GIFT_FROM_EMAIL must both be set",
+    );
+    return "not-configured";
+  }
+
+  const sender = input.senderName?.trim() || "Someone";
+  const subject = `${sender} sent you a tarot reading`;
+
+  return postToResend(
+    apiKey,
+    {
+      from,
+      to: [input.to],
+      subject,
+      text: plainText(sender, input.note, input.claimUrl),
+      html: html(sender, input.note, input.claimUrl),
+    },
+    input.idempotencyKey,
+    "gift email",
+  );
+}
+
+export type GiftBuyerEmailInput = {
+  /** Resend Idempotency-Key, e.g. "gift-buyer-<orderId>". */
+  idempotencyKey?: string;
+  /** The buyer's address, from Stripe's checkout session customer_details. */
+  to: string;
+  /** Null when the gift was bought without a recipient address. */
+  recipientEmail: string | null;
+  claimUrl: string;
+};
+
+/**
+ * The buyer's gift receipt: always carries the claim link, so the buyer can
+ * share it themselves whether or not we could email the recipient. Same
+ * result contract as sendGiftEmail; never throws.
+ */
+export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<GiftSendResult> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const from = process.env.GIFT_FROM_EMAIL;
+  if (!apiKey || !from) {
+    console.error(
+      "gift receipt not sent — RESEND_API_KEY and GIFT_FROM_EMAIL must both be set",
+    );
+    return "not-configured";
+  }
+
+  return postToResend(
+    apiKey,
+    {
+      from,
+      to: [input.to],
+      subject: "Your gift reading is ready to share",
+      text: buyerText(input.recipientEmail, input.claimUrl),
+      html: buyerHtml(input.recipientEmail, input.claimUrl),
+    },
+    input.idempotencyKey,
+    "gift receipt",
+  );
+}
+
+
+export function buyerText(recipientEmail: string | null, url: string): string {
+  return [
+    "Thank you — your gift reading is paid for and ready.",
+    "",
+    recipientEmail
+      ? `We've also emailed it to ${recipientEmail}. If it doesn't arrive, ${SHARE_CLAIM_LINK_COPY.toLowerCase()}:`
+      : `${SHARE_CLAIM_LINK_COPY}:`,
+    url,
+    "",
+    "The link works once: whoever opens it turns the card.",
+  ].join("\n");
+}
+
+function buyerHtml(recipientEmail: string | null, url: string): string {
+  const lead = recipientEmail
+    ? `We&rsquo;ve also emailed it to ${escapeHtml(recipientEmail)}. If it doesn&rsquo;t arrive, share this link with the person you&rsquo;re gifting.`
+    : "Share this link with the person you&rsquo;re gifting.";
+  const safeUrl = escapeHtml(url);
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:32px 16px;background:#0d0b14;font-family:Georgia,'Times New Roman',serif;color:#f4ecdf;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;margin:0 auto;">
+      <tr><td style="text-align:center;padding-bottom:8px;">
+        <p style="margin:0;font-size:11px;letter-spacing:4px;text-transform:uppercase;color:#c6a055;">Divine Insight</p>
+      </td></tr>
+      <tr><td style="text-align:center;padding:16px 0 8px;">
+        <h1 style="margin:0;font-size:24px;font-weight:500;color:#f4ecdf;">Your gift reading is ready</h1>
+      </td></tr>
+      <tr><td style="text-align:center;padding:8px 0 20px;">
+        <p style="margin:0;font-size:14px;line-height:1.7;color:#bfb4a0;">${lead}</p>
+      </td></tr>
+      <tr><td style="text-align:center;padding-bottom:20px;">
+        <a href="${safeUrl}" style="display:inline-block;padding:14px 32px;border-radius:999px;background:#c6a055;color:#0d0b14;font-size:13px;letter-spacing:2px;text-transform:uppercase;text-decoration:none;">Open the gift link</a>
+        <p style="margin:12px 0 0;font-size:12px;word-break:break-all;color:#8e8676;">${safeUrl}</p>
+      </td></tr>
+      <tr><td style="text-align:center;border-top:1px solid rgba(255,255,255,0.08);padding-top:16px;">
+        <p style="margin:0;font-size:11px;line-height:1.6;color:#8e8676;">The link works once: whoever opens it turns the card.</p>
+      </td></tr>
+    </table>
+  </body>
+</html>`;
 }
 
 /** Build the claim URL for a token. */

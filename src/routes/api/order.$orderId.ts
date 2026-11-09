@@ -14,8 +14,18 @@
  * grandfathered (see ~/lib/order-access).
  *
  * Response: { "status": "pending" | "paid", "kind": "single" | "extended" | "gift", "credits": 2 }
+ *
+ * A PAID gift order also returns "claimUrl" — the one shareable claim link —
+ * so the buyer can always see it on their confirmation view, with or without
+ * a recipient email. It is only returned past the x-order-token check above,
+ * so holding the order id alone (Stripe URL, browser history) is not enough.
+ * This route NEVER mints: only the webhook does, so the recipient and buyer
+ * emails go out exactly once. A paid gift whose webhook has not minted yet
+ * simply has no claimUrl until it does.
  */
 import { createFileRoute } from "@tanstack/react-router";
+import { claimUrlFor } from "~/lib/gift-email";
+import { getClaimForPaidGift } from "~/lib/gifts";
 import {
   checkOrderAccess,
   isMissingSchemaError,
@@ -55,6 +65,20 @@ export async function handleOrderGet(
     kind: order.kind,
     credits: order.credits,
   };
+
+  if (order.sku === "giftReading" && order.status === "paid") {
+    try {
+      // Read-only: the webhook is the only place a claim token is minted
+      // (and the emails sent). Until it has run, there is no link yet and the
+      // buyer view keeps polling.
+      const claim = await getClaimForPaidGift(order.id);
+      if (claim?.token) body.claimUrl = claimUrlFor(claim.token, request.url);
+    } catch (err) {
+      // The status answer still matters more than the link; the next poll
+      // retries.
+      console.error("gift claim lookup failed for order", order.id, err);
+    }
+  }
 
   // ?include=readings returns the saved readings for this order — the
   // bundle's "come back to it later" promise, and the seed of the journal.

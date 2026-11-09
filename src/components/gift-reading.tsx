@@ -10,8 +10,9 @@
  * the payment. The recipient's details are captured at checkout and stored on
  * the order, so delivery can be added without asking for them twice.
  *
- * Note: the gift is not yet emailed to the recipient. The order carries their
- * address; what remains is a sender and a claim link. See PAYMENTS.md.
+ * A valid recipient email is required before checkout (the server enforces
+ * the same rule). Once paid, the buyer is always shown the gift's one claim
+ * link here, to share themselves in case the recipient email goes astray.
  *
  * SSR-safe: the card starts null and the draw runs in an event handler, so the
  * server render is always deterministic.
@@ -20,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CardFace } from "~/components/card-face";
 import { DECK, type TarotCard } from "~/data/deck";
 import { useEntitlement } from "~/lib/entitlement";
+import { SHARE_CLAIM_LINK_COPY, isValidRecipientEmail } from "~/lib/gift-validation";
 import { GIFT_READING_PRICE, formatPrice } from "~/lib/payments";
 import { shuffle } from "~/lib/random";
 import { singleCardLine } from "~/lib/synthesis";
@@ -39,6 +41,7 @@ export function GiftReading() {
   const [recipientEmail, setRecipientEmail] = useState("");
   const [senderName, setSenderName] = useState("");
   const [note, setNote] = useState("");
+  const [emailError, setEmailError] = useState<string | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const entitlement = useEntitlement("giftReading");
@@ -113,19 +116,36 @@ export function GiftReading() {
           they can return to whenever they need it.
         </p>
 
+        {entitlement.claimUrl && <ClaimLinkPanel url={entitlement.claimUrl} />}
+
         {!unlocked && (
           <>
           <div className="mx-auto mt-6 flex max-w-sm flex-col gap-3 text-left">
             <label className="block">
-              <span className="sr-only">Who is it for? (email)</span>
+              <span className="sr-only">Who is it for? (email, required)</span>
               <input
                 type="email"
+                required
                 value={recipientEmail}
-                onChange={(e) => setRecipientEmail(e.target.value)}
+                onChange={(e) => {
+                  setRecipientEmail(e.target.value);
+                  if (emailError) setEmailError(null);
+                }}
                 placeholder="Who is it for? (their email)"
                 autoComplete="off"
+                aria-invalid={emailError ? true : undefined}
+                aria-describedby={emailError ? "gift-email-error" : undefined}
                 className={FIELD_CLS}
               />
+              {emailError && (
+                <span
+                  id="gift-email-error"
+                  role="alert"
+                  className="mt-2 block px-5 text-xs text-gold-200"
+                >
+                  {emailError}
+                </span>
+              )}
             </label>
             <label className="block">
               <span className="sr-only">Your name</span>
@@ -152,13 +172,18 @@ export function GiftReading() {
 
             <button
               type="button"
-              onClick={() =>
+              onClick={() => {
+                const check = validateGiftForm(recipientEmail);
+                if (!check.ok) {
+                  setEmailError(check.error);
+                  return;
+                }
                 void entitlement.startCheckout({
-                  recipientEmail: recipientEmail.trim() || undefined,
+                  recipientEmail: check.recipientEmail,
                   senderName: senderName.trim() || undefined,
                   note: note.trim() || undefined,
-                })
-              }
+                });
+              }}
               disabled={entitlement.busy}
               className="mt-1 inline-flex cursor-pointer items-center justify-center gap-3 rounded-full bg-gradient-to-b from-gold-300 via-gold-400 to-gold-500 px-9 py-4 text-sm font-medium tracking-[0.14em] text-night-950 uppercase shadow-[0_10px_40px_rgba(198,160,85,0.35)] transition hover:shadow-[0_12px_55px_rgba(198,160,85,0.55)] hover:brightness-105 active:scale-[0.98] disabled:cursor-wait disabled:opacity-60 sm:text-base"
             >
@@ -325,5 +350,61 @@ export function GiftReading() {
         )}
       </div>
     </section>
+  );
+}
+
+/**
+ * Client-side gate before checkout. Mirrors /api/checkout, which enforces the
+ * same rule server-side, so a gift can never be paid for without an address.
+ */
+export function validateGiftForm(
+  recipientEmail: string,
+): { ok: true; recipientEmail: string } | { ok: false; error: string } {
+  const trimmed = recipientEmail.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: "Add the email of the person you're gifting." };
+  }
+  if (!isValidRecipientEmail(trimmed)) {
+    return { ok: false, error: "That email doesn't look right. Please check it." };
+  }
+  return { ok: true, recipientEmail: trimmed };
+}
+
+/** The buyer's copy of the gift link, shown once the gift is paid. */
+export function ClaimLinkPanel({ url }: { url: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div
+      data-testid="gift-claim-link"
+      className="mx-auto mt-6 max-w-md rounded-xl border border-gold-500/30 bg-gold-500/5 p-4 text-left"
+    >
+      <p className="text-[10px] tracking-[0.3em] text-gold-400/90 uppercase">
+        Your gift link
+      </p>
+      <p className="mt-2 text-sm leading-relaxed text-cream-100/80">
+        {SHARE_CLAIM_LINK_COPY}. It works once — whoever opens it turns the card.
+      </p>
+      <div className="mt-3 flex items-center gap-2">
+        <input
+          readOnly
+          value={url}
+          aria-label="Gift claim link"
+          onFocus={(e) => e.currentTarget.select()}
+          className="min-w-0 flex-1 rounded-full border border-gold-500/30 bg-night-900/75 px-4 py-2 text-xs text-cream-100"
+        />
+        <button
+          type="button"
+          onClick={() => {
+            void navigator.clipboard?.writeText(url).then(
+              () => setCopied(true),
+              () => setCopied(false),
+            );
+          }}
+          className="shrink-0 cursor-pointer rounded-full border border-gold-500/50 px-4 py-2 text-[11px] tracking-[0.14em] text-gold-300 uppercase transition hover:bg-gold-500/10"
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
   );
 }

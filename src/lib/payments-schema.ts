@@ -51,7 +51,25 @@ export const REQUIRED_PAYMENTS_SCHEMA: Record<string, string[]> = {
 export const PAYMENTS_SCHEMA_REQUIREMENTS: {
   migration: string;
   schema: Record<string, string[]>;
-}[] = [{ migration: PAYMENTS_MIGRATION, schema: REQUIRED_PAYMENTS_SCHEMA }];
+}[] = [
+  { migration: PAYMENTS_MIGRATION, schema: REQUIRED_PAYMENTS_SCHEMA },
+  // #32: gift email bookkeeping (sent flags + send leases).
+  {
+    migration: "migrations/0005_gift_claim_email_flags.sql",
+    schema: {
+      gift_claims: [
+        "recipient_emailed_at",
+        "buyer_emailed_at",
+        "recipient_email_lease_until",
+        "buyer_email_lease_until",
+        "recipient_email_attempts",
+        "buyer_email_attempts",
+        "recipient_email_failed_at",
+        "buyer_email_failed_at",
+      ],
+    },
+  },
+];
 
 /** Pure diff, separated for testing. Returns "table" or "table.column" entries. */
 export function missingSchema(
