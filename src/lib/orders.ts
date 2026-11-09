@@ -216,19 +216,36 @@ export async function markPaymentFailed(args: {
 }): Promise<"failed" | "duplicate" | "not-pending" | "unknown-order"> {
   if (!isUuid(args.orderId)) return "unknown-order";
   const db = sql();
-  const claimed = await db`
-    insert into stripe_events (id) values (${args.eventId})
-    on conflict (id) do nothing
-    returning id`;
-  if (claimed.length === 0) return "duplicate";
-  const updated = await db`
-    update orders
-       set status = 'failed',
-           stripe_session_id = coalesce(stripe_session_id, ${args.sessionId})
-     where id = ${args.orderId}
-       and status = 'pending'
-    returning id`;
-  if (updated.length > 0) return "failed";
+  // ONE statement, so it is atomic: the order update and the event record
+  // commit together or not at all. Recording the event first (separately)
+  // meant a crash between the two left the event "seen" and the order stuck
+  // in pending forever, because every Stripe retry answered "duplicate".
+  // The update only runs for an event we have not processed yet; the status
+  // guard (and the row lock it takes) keeps concurrent deliveries safe.
+  const rows = (await db`
+    with updated as (
+      update orders
+         set status = 'failed',
+             stripe_session_id = coalesce(stripe_session_id, ${args.sessionId})
+       where id = ${args.orderId}
+         and status = 'pending'
+         and not exists (select 1 from stripe_events where id = ${args.eventId})
+      returning id
+    ),
+    claimed as (
+      insert into stripe_events (id) values (${args.eventId})
+      on conflict (id) do nothing
+      returning id
+    )
+    select (select count(*) from updated)::int as updated,
+           (select count(*) from claimed)::int as claimed`) as Array<{
+    updated: number;
+    claimed: number;
+  }>;
+  const updated = Number(rows[0]?.updated ?? 0);
+  const claimed = Number(rows[0]?.claimed ?? 0);
+  if (updated > 0) return "failed";
+  if (claimed === 0) return "duplicate";
   const order = await getOrder(args.orderId);
   return order ? "not-pending" : "unknown-order";
 }

@@ -43,6 +43,16 @@ export const REQUIRED_PAYMENTS_SCHEMA: Record<string, string[]> = {
   ],
 };
 
+/**
+ * Every migration the payments code depends on, with the tables/columns it
+ * provides. Later PRs append their own entry (e.g. #32's 0005 email flags)
+ * so the readiness check names exactly which file is missing.
+ */
+export const PAYMENTS_SCHEMA_REQUIREMENTS: {
+  migration: string;
+  schema: Record<string, string[]>;
+}[] = [{ migration: PAYMENTS_MIGRATION, schema: REQUIRED_PAYMENTS_SCHEMA }];
+
 /** Pure diff, separated for testing. Returns "table" or "table.column" entries. */
 export function missingSchema(
   present: { table_name: string; column_name: string }[],
@@ -65,11 +75,38 @@ export function missingSchema(
   return missing;
 }
 
-export async function checkPaymentsSchema(): Promise<{
+export type PaymentsSchemaStatus = {
   ok: boolean;
+  /** "table" or "table.column" entries, de-duplicated, in requirement order. */
   missing: string[];
-}> {
-  const tables = Object.keys(REQUIRED_PAYMENTS_SCHEMA);
+  /** Migration files that would supply what is missing, in apply order. */
+  migrations: string[];
+};
+
+/** Pure: evaluate every requirement against information_schema rows. */
+export function evaluatePaymentsSchema(
+  present: { table_name: string; column_name: string }[],
+  requirements = PAYMENTS_SCHEMA_REQUIREMENTS,
+): PaymentsSchemaStatus {
+  const missing: string[] = [];
+  const migrations: string[] = [];
+  for (const req of requirements) {
+    const gaps = missingSchema(present, req.schema).filter(
+      (g) => !missing.includes(g),
+    );
+    if (gaps.length === 0) continue;
+    missing.push(...gaps);
+    if (!migrations.includes(req.migration)) migrations.push(req.migration);
+  }
+  return { ok: missing.length === 0, missing, migrations };
+}
+
+export async function checkPaymentsSchema(
+  requirements = PAYMENTS_SCHEMA_REQUIREMENTS,
+): Promise<PaymentsSchemaStatus> {
+  const tables = [
+    ...new Set(requirements.flatMap((r) => Object.keys(r.schema))),
+  ];
   const rows = (await sql()`
     select table_name, column_name
       from information_schema.columns
@@ -78,6 +115,5 @@ export async function checkPaymentsSchema(): Promise<{
     table_name: string;
     column_name: string;
   }[];
-  const missing = missingSchema(rows);
-  return { ok: missing.length === 0, missing };
+  return evaluatePaymentsSchema(rows, requirements);
 }

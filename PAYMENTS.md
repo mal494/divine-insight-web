@@ -115,7 +115,9 @@ has no order or recipient; it is recorded in `orphan_payments` for support.
   - `checkout.session.completed`
   - `checkout.session.async_payment_succeeded` (fulfilled exactly like `completed` once paid)
   - `checkout.session.async_payment_failed` (moves the pending order to `failed`;
-    never grants credits or creates a gift link; idempotent; always 2xx)
+    never grants credits or creates a gift link; idempotent; the order update
+    and the event record are one atomic statement, so a crash can't leave the
+    event "seen" with the order still pending; 2xx unless the DB errors)
 
 **Payment links (per environment)**
 
@@ -216,7 +218,9 @@ before merging. It is idempotent and safe to run while older code is live.
 Without it the code fails closed: checkout, order, reading and claim answer
 503 (`schema_not_migrated` where detectable), the webhook answers 5xx so Stripe
 retries, and `GET /api/health/payments` returns 503 listing what is missing
-(200 `{ ok: true }` when ready; read-only, no DDL).
+(200 `{ ok: true }` when ready; read-only, no DDL). It is public, so it is
+rate-limited by caching: a 200 is cached per instance for 60 s, a 503 for 5 s,
+concurrent requests share one query, and errors are not cached.
 
 ## Divine Insight Pro
 
