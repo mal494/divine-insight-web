@@ -56,9 +56,17 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    deploy):
    - A delivery takes a short send lease (`*_email_lease_until`, 120 s).
      `*_emailed_at` is set only after Resend accepted the email.
-   - A transient failure (network, timeout, 5xx, 429, 408, or Resend's 409
-     `concurrent_idempotent_requests`) releases the lease, counts an attempt
+   - A transient failure releases the lease, counts an attempt
      (`*_email_attempts`) and the webhook answers 500, so Stripe retries.
+     Transient means: network error, timeout, 5xx, 429, 408, 401/403 (a wrong
+     or restricted `RESEND_API_KEY` or an unverified sender domain), and every
+     409 except `invalid_idempotent_request` (`concurrent_idempotent_requests`,
+     `resource_locked`, unknown or unparseable). The cap below bounds all of
+     them, so a misclassification costs a few retries, never a loop.
+   - Only the lease holder can release a lease: `reserveGiftEmail` returns the
+     exact `*_email_lease_until` it wrote as a fencing token, and every release
+     matches on it. A delivery that stalled past its lease and was overtaken
+     cannot clear the new holder's lease or count an attempt.
    - Retries are bounded: after `GIFT_EMAIL_MAX_ATTEMPTS` failed sends
      (default 5) or once the order has been paid for longer than
      `GIFT_EMAIL_GIVE_UP_HOURS` (default 6), `*_email_failed_at` is set, the
@@ -67,6 +75,34 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
      disabled. The buyer still sees the claim link on the confirmation view.
      Support can list stuck emails with `select order_id from gift_claims where
      recipient_email_failed_at is not null or buyer_email_failed_at is not null`.
+   - **Recovering emails that gave up** (e.g. after fixing a wrong
+     `RESEND_API_KEY`, an unverified domain, or after an outage). This is a
+     production write, so get the owner's OK first:
+     1. Fix the configuration (env vars, then redeploy) and confirm with one
+        test gift in preview or a single real order.
+     2. List the affected orders (query above) and reset only those rows,
+        leaving anything already sent alone:
+        ```sql
+        update gift_claims
+           set recipient_email_failed_at = null, recipient_email_attempts = 0,
+               recipient_email_lease_until = null
+         where order_id = any($1) and recipient_emailed_at is null;
+        update gift_claims
+           set buyer_email_failed_at = null, buyer_email_attempts = 0,
+               buyer_email_lease_until = null
+         where order_id = any($1) and buyer_emailed_at is null;
+        ```
+     3. Re-run delivery by resending each order's `checkout.session.completed`
+        event from Stripe (Dashboard → Developers → Events → Resend, events up
+        to 15 days old; `stripe events resend <evt_id>` up to 30 days). The
+        webhook sees the order as already paid and only sends the missing
+        emails. Each resend counts against the age cap from `paid_at`, so
+        raise `GIFT_EMAIL_GIVE_UP_HOURS` (max 72) for the re-run if the orders
+        are older than the cap. Otherwise the first failure gives up again
+        (a successful send is unaffected).
+     4. Check `*_emailed_at` is now set for those rows. Orders past Stripe's
+        resend window need a hand-sent email with the claim link from the
+        buyer's confirmation view (see the make-whole plan).
    - Each Resend call has a 12 s timeout (AbortController); a timeout counts as
      a transient failure.
    - A crash mid-send leaves only the lease. It expires and a later retry sends.
