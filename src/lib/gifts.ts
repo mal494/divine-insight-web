@@ -82,9 +82,20 @@ export function giftEmailRetryPolicy(
 }
 
 /**
+ * Outcome of reserveGiftEmail. A "reserved" result carries `lease`, a fencing
+ * token: the exact `*_email_lease_until` value this caller wrote (as text,
+ * microsecond precision). releaseGiftEmail only acts while that value is still
+ * in place, so a delivery whose lease expired and was taken over by another
+ * delivery can never clear the new holder's lease or count its attempt.
+ */
+export type GiftEmailReservation =
+  | { status: "reserved"; lease: string }
+  | { status: "sent" | "busy" | "gave-up" };
+
+/**
  * Claim the right to send one gift email (per order and kind).
  *   "reserved" — this caller must send, then call markGiftEmailSent on
- *                success or releaseGiftEmail on failure.
+ *                success or releaseGiftEmail(…, lease) on failure.
  *   "sent"     — already sent and recorded; nothing to do.
  *   "gave-up"  — retries were exhausted earlier (`*_email_failed_at` set);
  *                nothing to do, the buyer has the link.
@@ -97,7 +108,7 @@ export function giftEmailRetryPolicy(
 export async function reserveGiftEmail(
   orderId: string,
   kind: GiftEmailKind,
-): Promise<"reserved" | "sent" | "busy" | "gave-up"> {
+): Promise<GiftEmailReservation> {
   const db = sql();
   try {
     const won =
@@ -108,15 +119,16 @@ export async function reserveGiftEmail(
                and recipient_emailed_at is null
                and recipient_email_failed_at is null
                and (recipient_email_lease_until is null or recipient_email_lease_until < now())
-            returning order_id`
+            returning recipient_email_lease_until::text as lease`
         : await db`
             update gift_claims set buyer_email_lease_until = now() + make_interval(secs => ${GIFT_EMAIL_LEASE_SECONDS})
              where order_id = ${orderId}
                and buyer_emailed_at is null
                and buyer_email_failed_at is null
                and (buyer_email_lease_until is null or buyer_email_lease_until < now())
-            returning order_id`;
-    if (won.length > 0) return "reserved";
+            returning buyer_email_lease_until::text as lease`;
+    const lease = (won[0] as { lease?: unknown } | undefined)?.lease;
+    if (typeof lease === "string" && lease) return { status: "reserved", lease };
     const state =
       kind === "recipient"
         ? await db`
@@ -126,9 +138,9 @@ export async function reserveGiftEmail(
             select buyer_emailed_at is not null as sent, buyer_email_failed_at is not null as failed
               from gift_claims where order_id = ${orderId}`;
     const row = state[0] as { sent?: boolean; failed?: boolean } | undefined;
-    if (row?.sent) return "sent";
-    if (row?.failed) return "gave-up";
-    return "busy";
+    if (row?.sent) return { status: "sent" };
+    if (row?.failed) return { status: "gave-up" };
+    return { status: "busy" };
   } catch (err) {
     if (isMissingColumn(err)) throw new GiftSchemaMissingError(err);
     throw err;
@@ -150,7 +162,10 @@ export async function markGiftEmailSent(orderId: string, kind: GiftEmailKind): P
 }
 
 /**
- * Give the lease back after a failed send and count the attempt.
+ * Give the lease back after a failed send and count the attempt. Only the
+ * lease holder can do this: every update matches `*_email_lease_until =
+ * lease`. If the lease already expired and another delivery took it over,
+ * nothing is changed and "retry" is returned (the new holder decides).
  *   "retry"   — the next delivery may try again at once (caller answers 500).
  *   "gave-up" — the attempt cap or the age cap was reached (or the failure was
  *               permanent): `*_email_failed_at` is now set and no delivery
@@ -160,33 +175,42 @@ export async function markGiftEmailSent(orderId: string, kind: GiftEmailKind): P
 export async function releaseGiftEmail(
   orderId: string,
   kind: GiftEmailKind,
+  lease: string,
   opts: { permanent?: boolean; policy?: GiftEmailRetryPolicy } = {},
 ): Promise<"retry" | "gave-up"> {
   const db = sql();
   if (opts.permanent) {
-    if (kind === "recipient") {
-      await db`
-        update gift_claims set recipient_email_failed_at = now(), recipient_email_lease_until = null
-         where order_id = ${orderId} and recipient_emailed_at is null`;
-    } else {
-      await db`
-        update gift_claims set buyer_email_failed_at = now(), buyer_email_lease_until = null
-         where order_id = ${orderId} and buyer_emailed_at is null`;
-    }
-    return "gave-up";
+    const held =
+      kind === "recipient"
+        ? await db`
+            update gift_claims set recipient_email_failed_at = now(), recipient_email_lease_until = null
+             where order_id = ${orderId} and recipient_emailed_at is null
+               and recipient_email_lease_until = ${lease}::timestamptz
+            returning order_id`
+        : await db`
+            update gift_claims set buyer_email_failed_at = now(), buyer_email_lease_until = null
+             where order_id = ${orderId} and buyer_emailed_at is null
+               and buyer_email_lease_until = ${lease}::timestamptz
+            returning order_id`;
+    return held.length > 0 ? "gave-up" : "retry";
   }
   const policy = opts.policy ?? giftEmailRetryPolicy();
-  if (kind === "recipient") {
-    await db`
-      update gift_claims set recipient_email_lease_until = null,
-             recipient_email_attempts = recipient_email_attempts + 1
-       where order_id = ${orderId} and recipient_emailed_at is null`;
-  } else {
-    await db`
-      update gift_claims set buyer_email_lease_until = null,
-             buyer_email_attempts = buyer_email_attempts + 1
-       where order_id = ${orderId} and buyer_emailed_at is null`;
-  }
+  const held =
+    kind === "recipient"
+      ? await db`
+          update gift_claims set recipient_email_lease_until = null,
+                 recipient_email_attempts = recipient_email_attempts + 1
+           where order_id = ${orderId} and recipient_emailed_at is null
+             and recipient_email_lease_until = ${lease}::timestamptz
+          returning order_id`
+      : await db`
+          update gift_claims set buyer_email_lease_until = null,
+                 buyer_email_attempts = buyer_email_attempts + 1
+           where order_id = ${orderId} and buyer_emailed_at is null
+             and buyer_email_lease_until = ${lease}::timestamptz
+          returning order_id`;
+  // Not the holder any more: leave the new holder's lease and count alone.
+  if (held.length === 0) return "retry";
   // Second, separate statement: decide whether to stop. Idempotent, so a
   // crash between the two only delays the decision to the next failure.
   const stopped =

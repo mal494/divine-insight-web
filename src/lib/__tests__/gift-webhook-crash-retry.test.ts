@@ -99,7 +99,7 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     if (until && until > clock) return [];
     c[`${kind}_email_lease_until`] = clock + Number(secs) * 1000;
     step(`after-reserve-${kind}`); // committed, then the process dies
-    return [{ order_id: orderId }];
+    return [{ order_id: orderId, lease: String(c[`${kind}_email_lease_until`]) }];
   }
   const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent(?:, \w+ is not null as failed)? from gift_claims/.exec(q);
   if (sentQ) {
@@ -126,10 +126,11 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     const c = claims.find((x) => x.order_id === values[0]) as Record<string, unknown> | undefined;
     if (!c || c[`${kind}_emailed_at`]) return [];
     if (failQ[2]) {
-      // permanent rejection
+      // permanent rejection, holder only (lease fencing token = values[1])
+      if (String(c[`${kind}_email_lease_until`]) !== String(values[1])) return [];
       c[`${kind}_email_failed_at`] = new Date();
       c[`${kind}_email_lease_until`] = null;
-      return [];
+      return [{ order_id: values[0] }];
     }
     if (c[`${kind}_email_failed_at`]) return [];
     const [, maxAttempts, giveUpSecs] = values as [string, number, number];
@@ -145,14 +146,15 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
   if (release) {
     const kind = release[1] as "recipient" | "buyer";
     const c = claims.find((x) => x.order_id === values[0]);
-    if (c && !c[`${kind}_emailed_at`]) {
-      c[`${kind}_email_lease_until`] = null;
-      if (q.includes("_email_attempts = ")) {
-        const r = c as Record<string, unknown>;
-        r[`${kind}_email_attempts`] = Number(r[`${kind}_email_attempts`] ?? 0) + 1;
-      }
+    if (!c || c[`${kind}_emailed_at`]) return [];
+    // holder only: the lease fencing token is the last parameter
+    if (String(c[`${kind}_email_lease_until`]) !== String(values[values.length - 1])) return [];
+    c[`${kind}_email_lease_until`] = null;
+    if (q.includes("_email_attempts = ")) {
+      const r = c as Record<string, unknown>;
+      r[`${kind}_email_attempts`] = Number(r[`${kind}_email_attempts`] ?? 0) + 1;
     }
-    return [];
+    return [{ order_id: values[0] }];
   }
   throw new Error(`Unexpected query in test double: ${q}`);
 }
@@ -455,5 +457,57 @@ describe("giftEmailRetryPolicy", () => {
     for (const bad of ["0", "-2", "73", "x", "1e2"]) {
       expect(giftEmailRetryPolicy({ GIFT_EMAIL_GIVE_UP_HOURS: bad }).giveUpAfterSeconds).toBe(6 * 3600);
     }
+  });
+});
+
+describe("R7-4: only the lease holder can release a send lease", () => {
+  function seedClaim() {
+    claims.push({
+      token: "tok",
+      order_id: ORDER,
+      claimed: false,
+      recipient_emailed_at: null,
+      buyer_emailed_at: null,
+      recipient_email_lease_until: null,
+      buyer_email_lease_until: null,
+    });
+    return claims[0] as unknown as Record<string, unknown>;
+  }
+
+  test("a delivery whose lease expired and was taken over cannot clear the new lease or count an attempt", async () => {
+    const { reserveGiftEmail, releaseGiftEmail } = await import("~/lib/gifts");
+    const c = seedClaim();
+    const a = await reserveGiftEmail(ORDER, "recipient");
+    expect(a.status).toBe("reserved");
+    clock += (GIFT_EMAIL_LEASE_SECONDS + 1) * 1000; // A stalls past its lease
+    const b = await reserveGiftEmail(ORDER, "recipient");
+    expect(b.status).toBe("reserved");
+    if (a.status !== "reserved" || b.status !== "reserved") throw new Error("unreachable");
+    expect(b.lease).not.toBe(a.lease);
+
+    // A finally fails: stale release is a no-op.
+    expect(await releaseGiftEmail(ORDER, "recipient", a.lease)).toBe("retry");
+    expect(String(c.recipient_email_lease_until)).toBe(b.lease);
+    expect(c.recipient_email_attempts ?? 0).toBe(0);
+    // ...and a stale permanent rejection does not fail the email either.
+    expect(await releaseGiftEmail(ORDER, "recipient", a.lease, { permanent: true })).toBe("retry");
+    expect(c.recipient_email_failed_at ?? null).toBeNull();
+    // While B holds the lease, nobody else can reserve.
+    expect((await reserveGiftEmail(ORDER, "recipient")).status).toBe("busy");
+
+    // The holder's release works.
+    expect(await releaseGiftEmail(ORDER, "recipient", b.lease)).toBe("retry");
+    expect(c.recipient_email_lease_until).toBeNull();
+    expect(c.recipient_email_attempts).toBe(1);
+  });
+
+  test("the holder's permanent rejection records the failure", async () => {
+    const { reserveGiftEmail, releaseGiftEmail } = await import("~/lib/gifts");
+    const c = seedClaim();
+    const r = await reserveGiftEmail(ORDER, "buyer");
+    if (r.status !== "reserved") throw new Error("expected a lease");
+    expect(await releaseGiftEmail(ORDER, "buyer", r.lease, { permanent: true })).toBe("gave-up");
+    expect(c.buyer_email_failed_at).toBeInstanceOf(Date);
+    expect((await reserveGiftEmail(ORDER, "buyer")).status).toBe("gave-up");
   });
 });
