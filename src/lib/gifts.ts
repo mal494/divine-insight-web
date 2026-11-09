@@ -1,9 +1,10 @@
 /**
  * gifts.ts — claim links for the Gift Reading.
  *
- * A gift is an order someone else paid for. The buyer never sees the card:
- * the recipient gets an email with a claim link, opens it, and draws their
- * own. The token in that link is the recipient's only credential, so it is
+ * A gift is an order someone else paid for. Every paid gift gets exactly one
+ * claim link: the recipient is emailed it (when an address and Resend are
+ * configured) and the buyer is always shown it on their confirmation view and
+ * in their gift receipt email, so a paid gift can never be stranded. The token in that link is the recipient's only credential, so it is
  * random, single-use, and never guessable from the order id.
  *
  * Server-only. Lives beside orders.ts and shares its schema bootstrap.
@@ -86,8 +87,14 @@ export async function getGiftDetails(orderId: string): Promise<GiftDetails | nul
  * Mint the claim token for a paid gift order. Idempotent: a Stripe retry that
  * slips past the event guard still yields the one token we already sent, so a
  * recipient never gets two different links for one gift.
+ *
+ * `created` is true only for the call that actually inserted the row, which is
+ * how callers send the recipient/buyer emails exactly once even when Stripe
+ * retries or the buyer's confirmation view mints the token first.
  */
-export async function createGiftClaim(orderId: string): Promise<string> {
+export async function createGiftClaim(
+  orderId: string,
+): Promise<{ token: string; created: boolean }> {
   await ensureGiftSchema();
   const db = sql();
 
@@ -99,11 +106,31 @@ export async function createGiftClaim(orderId: string): Promise<string> {
       on conflict (order_id) do nothing
       returning token
     )
-    select token from inserted
+    select token, true as created from inserted
     union all
-    select token from gift_claims where order_id = ${orderId}
+    select token, false as created from gift_claims where order_id = ${orderId}
     limit 1`;
-  return (rows[0] as { token: string }).token;
+  const row = rows[0] as { token: string; created: boolean } | undefined;
+  if (!row) throw new Error(`gift claim could not be minted for order ${orderId}`);
+  return { token: row.token, created: Boolean(row.created) };
+}
+
+/**
+ * The claim link for a PAID gift order, minting it if it is missing. This is
+ * the self-healing path for gifts paid before the webhook always minted a
+ * token (or whose mint failed): the buyer's confirmation view calls it, so a
+ * paid gift always has a claim path. Returns null for unpaid / non-gift orders.
+ */
+export async function ensureClaimForPaidGift(
+  orderId: string,
+): Promise<{ token: string; created: boolean; gift: GiftDetails } | null> {
+  const gift = await getGiftDetails(orderId);
+  if (!gift) return null;
+  const paid = await sql()`
+    select 1 from orders where id = ${orderId} and status = 'paid' limit 1`;
+  if (paid.length === 0) return null;
+  const claim = await createGiftClaim(orderId);
+  return { ...claim, gift };
 }
 
 /** What the claim page may show before the recipient turns their card. */

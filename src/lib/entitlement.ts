@@ -62,13 +62,19 @@ export type Entitlement = {
   /** Spend a credit and store the reading. Call once the cards are down. */
   recordReading: (reading: unknown) => Promise<void>;
   busy: boolean;
+  /**
+   * For a paid gift: the one shareable claim link, always shown to the buyer
+   * (with or without a recipient email). Null for every other SKU.
+   */
+  claimUrl: string | null;
 };
 
-type OrderView = { status: string; credits: number };
+type OrderView = { status: string; credits: number; claimUrl?: string };
 export type EntitlementOrderSnapshot = {
   id: string;
   status: string;
   credits: number;
+  claimUrl?: string | null;
 };
 
 export type CheckoutTabHandle = {
@@ -117,6 +123,7 @@ export function resolveEntitlementFromOrders(
   credits: number;
   activeOrderId: string | null;
   settled: boolean;
+  claimUrl: string | null;
 } {
   let best: EntitlementOrderSnapshot | null = null;
   let sawPending = false;
@@ -139,10 +146,17 @@ export function resolveEntitlementFromOrders(
       credits: best.credits,
       activeOrderId: best.id,
       settled: true,
+      claimUrl: best.claimUrl ?? null,
     };
   }
   if (best) {
-    return { status: "spent", credits: 0, activeOrderId: best.id, settled: true };
+    return {
+      status: "spent",
+      credits: 0,
+      activeOrderId: best.id,
+      settled: true,
+      claimUrl: best.claimUrl ?? null,
+    };
   }
   if (sawPending) {
     return {
@@ -150,9 +164,16 @@ export function resolveEntitlementFromOrders(
       credits: 0,
       activeOrderId: null,
       settled: false,
+      claimUrl: null,
     };
   }
-  return { status: "locked", credits: 0, activeOrderId: null, settled: false };
+  return {
+    status: "locked",
+    credits: 0,
+    activeOrderId: null,
+    settled: false,
+    claimUrl: null,
+  };
 }
 
 export function useEntitlement(
@@ -162,6 +183,7 @@ export function useEntitlement(
   const [status, setStatus] = useState<EntitlementStatus>("locked");
   const [credits, setCredits] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [claimUrl, setClaimUrl] = useState<string | null>(null);
 
   /** Every SKU that can unlock this view, primary first. */
   const skusRef = useRef<Sku[]>([primary, ...(options?.alsoAccept ?? [])]);
@@ -210,15 +232,26 @@ export function useEntitlement(
       } catch {
         continue;
       }
-      snapshots.push({ id, status: view.status, credits: view.credits });
+      snapshots.push({
+        id,
+        status: view.status,
+        credits: view.credits,
+        claimUrl: typeof view.claimUrl === "string" ? view.claimUrl : null,
+      });
     }
 
     const next = resolveEntitlementFromOrders(snapshots);
     activeOrderId.current = next.activeOrderId;
     setCredits(next.credits);
     setStatus(next.status);
+    setClaimUrl(next.claimUrl);
+    // A paid gift whose link has not come back yet (a transient mint failure
+    // on the server) is not settled: keep polling until the buyer has it.
+    if (next.settled && next.status !== "locked" && primary === "giftReading" && !next.claimUrl) {
+      return false;
+    }
     return next.settled;
-  }, []);
+  }, [primary]);
 
   const beginPolling = useCallback(() => {
     stopPolling();
@@ -329,5 +362,5 @@ export function useEntitlement(
     [refresh],
   );
 
-  return { status, credits, startCheckout, recordReading, busy };
+  return { status, credits, startCheckout, recordReading, busy, claimUrl };
 }

@@ -13,10 +13,12 @@
  *
  * Always answer 200 once the signature is good, even when we decide not to
  * fulfil — a non-2xx makes Stripe retry for days over something a retry will
- * never fix. Refusals are logged instead.
+ * never fix. Refusals are logged instead. The one exception is a paid gift
+ * whose claim token could not be minted (a transient database error): that
+ * answers 500 so Stripe retries until the gift has a claim path.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { claimUrlFor, sendGiftEmail } from "~/lib/gift-email";
+import { claimUrlFor, sendGiftBuyerEmail, sendGiftEmail } from "~/lib/gift-email";
 import { createGiftClaim, getGiftDetails } from "~/lib/gifts";
 import { markPaid } from "~/lib/orders";
 import { recordOrphanPayment, type OrphanReason } from "~/lib/orphan-payments";
@@ -106,22 +108,63 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     return orphan(event, result, result);
   }
 
-  // A paid gift is the one SKU with something to deliver. Mint the claim
-  // token and email the recipient only on the first paid transition.
-  if (result === "applied") {
+  // A paid gift is the one SKU with something to deliver, and it must never
+  // be paid without a claim path. Mint the claim token on every successful
+  // outcome (minting is idempotent, so a retry re-uses the one token), and
+  // send the emails only from the call that actually created it.
+  let gift: Awaited<ReturnType<typeof getGiftDetails>> = null;
+  try {
+    gift = await getGiftDetails(orderId);
+  } catch (err) {
+    console.error("gift lookup failed for order", orderId, err);
+    // Non-2xx so Stripe retries: the retry re-runs this block (markPaid
+    // answers "duplicate"/"already-paid") and mints the token then.
+    return new Response("gift delivery pending", { status: 500 });
+  }
+
+  if (gift) {
+    let claim: { token: string; created: boolean };
     try {
-      const gift = await getGiftDetails(orderId);
-      if (gift?.recipientEmail) {
-        const token = await createGiftClaim(orderId);
-        await sendGiftEmail({
-          to: gift.recipientEmail,
-          senderName: gift.senderName,
-          note: gift.note,
-          claimUrl: claimUrlFor(token, request.url),
-        });
-      }
+      claim = await createGiftClaim(orderId);
     } catch (err) {
-      console.error("gift delivery failed for order", orderId, err);
+      console.error("gift claim mint failed for order", orderId, err);
+      return new Response("gift delivery pending", { status: 500 });
+    }
+
+    if (claim.created) {
+      const claimUrl = claimUrlFor(claim.token, request.url);
+      if (!gift.recipientEmail) {
+        // Support breadcrumb. Never log the token itself: the link is the
+        // recipient's only credential.
+        console.warn(
+          "paid gift has no recipient email — claim link shown to buyer only",
+          { orderId, sessionId: session.id ?? null },
+        );
+      }
+      try {
+        if (gift.recipientEmail) {
+          await sendGiftEmail({
+            to: gift.recipientEmail,
+            senderName: gift.senderName,
+            note: gift.note,
+            claimUrl,
+          });
+        }
+        const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
+        if (buyerEmail) {
+          await sendGiftBuyerEmail({
+            to: buyerEmail,
+            recipientEmail: gift.recipientEmail,
+            claimUrl,
+          });
+        } else {
+          console.warn("paid gift has no buyer email for receipt", { orderId });
+        }
+      } catch (err) {
+        // Email is best-effort; the claim link already exists and the buyer
+        // sees it on the confirmation view.
+        console.error("gift email failed for order", orderId, err);
+      }
     }
   }
 
@@ -167,6 +210,7 @@ type StripeEvent = {
       amount_total?: number;
       currency?: string;
       payment_link?: string | null;
+      customer_email?: string | null;
       customer_details?: { email?: string | null } | null;
     };
   };

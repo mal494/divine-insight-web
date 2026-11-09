@@ -17,6 +17,7 @@ describe("resolveEntitlementFromOrders", () => {
       credits: 2,
       activeOrderId: "fresh",
       settled: true,
+      claimUrl: null,
     });
   });
 
@@ -28,6 +29,7 @@ describe("resolveEntitlementFromOrders", () => {
       credits: 0,
       activeOrderId: "spent",
       settled: true,
+      claimUrl: null,
     });
   });
 
@@ -39,6 +41,7 @@ describe("resolveEntitlementFromOrders", () => {
       credits: 0,
       activeOrderId: null,
       settled: false,
+      claimUrl: null,
     });
   });
 
@@ -50,6 +53,7 @@ describe("resolveEntitlementFromOrders", () => {
       credits: 0,
       activeOrderId: null,
       settled: false,
+      claimUrl: null,
     });
   });
 });

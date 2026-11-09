@@ -39,10 +39,19 @@ scrolled past the CTA.
 
 A gift is the one SKU with something to deliver, so it has an extra leg:
 
-1. Checkout captures the recipient's email, the sender's name, and an optional
-   note, and stores them on the order.
-2. When the webhook marks a gift order paid, it mints a single-use claim token
-   (`gift_claims`) and emails the recipient a link to `/claim/<token>`.
+1. Checkout requires a valid recipient email (checked in the form and again in
+   `/api/checkout`, which answers 400 `invalid_recipient_email`), plus the
+   sender's name and an optional note, and stores them on the order.
+2. When the webhook sees a gift order paid, it ALWAYS mints the single-use
+   claim token (`gift_claims`), with or without a recipient email. Minting is
+   idempotent; if it fails the webhook answers 500 so Stripe retries. The call
+   that creates the token emails the recipient a link to `/claim/<token>` (when
+   there is an address) and sends the buyer a gift receipt carrying the same
+   link ("Share this link with the person you're gifting").
+   The buyer is also always shown the link on the gift confirmation view:
+   `/api/order/<id>` returns `claimUrl` for a paid gift, minting the token if
+   an older order never got one. Gifts with no recipient email are logged
+   (order id only, never the token) for support.
 3. The recipient opens the link, turns one card, and that POST burns the token,
    spends the credit, and stores the reading.
 4. Re-opening the link shows the same card again rather than drawing a new one,
@@ -74,7 +83,12 @@ no order ever becomes paid. That is the intended failure direction: a
 misconfigured site sells nothing rather than giving everything away.
 
 Without `RESEND_API_KEY` and `GIFT_FROM_EMAIL`, gift orders still complete and
-are still claimable - the email just never goes out, and the failure is logged.
+are still claimable - the emails just never go out, the failure is logged, and
+the buyer can still copy the link from the confirmation view.
+
+Paid gift orders created before every paid gift got a token can be backfilled
+with `scripts/backfills/2026-11-gift-claim-tokens.sql` (idempotent, run by
+hand; the buyer confirmation view also self-heals them on its next poll).
 Set both before selling gifts.
 
 **A webhook endpoint in Stripe**

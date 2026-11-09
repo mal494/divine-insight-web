@@ -18,8 +18,13 @@
  *           { "sku": "giftReading", "recipientEmail": "...", "senderName": "...", "note": "..." }
  * Response: { "orderId": "<uuid>", "accessToken": "<43 chars>",
  *             "url": "https://buy.stripe.com/...?client_reference_id=<uuid>" }
+ *
+ * A Gift Reading requires a valid recipientEmail; without one the request is
+ * refused with 400 { "error": "invalid_recipient_email" } before any order or
+ * Stripe link exists, so nobody can pay for a gift that has nowhere to go.
  */
 import { createFileRoute } from "@tanstack/react-router";
+import { normalizeRecipientEmail } from "~/lib/gift-validation";
 import {
   ORDER_ACCESS_MIGRATION,
   isMissingSchemaError,
@@ -54,14 +59,16 @@ export async function handleCheckout(
   const sku = input.sku;
   if (!isSku(sku)) return json({ error: "unknown_sku" }, 400);
 
-  const gift =
-    sku === "giftReading"
-      ? {
-          recipientEmail: str(input.recipientEmail, 320),
-          senderName: str(input.senderName, 120),
-          note: str(input.note, 2000),
-        }
-      : undefined;
+  let gift: { recipientEmail: string; senderName?: string; note?: string } | undefined;
+  if (sku === "giftReading") {
+    const recipientEmail = normalizeRecipientEmail(input.recipientEmail);
+    if (!recipientEmail) return json({ error: "invalid_recipient_email" }, 400);
+    gift = {
+      recipientEmail,
+      senderName: str(input.senderName, 120),
+      note: str(input.note, 2000),
+    };
+  }
 
   let link: string;
   try {
