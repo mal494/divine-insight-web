@@ -1,8 +1,8 @@
 /**
  * Regression guard for which server routes are Pro-gated.
  *
- * Today no Pro-only server operation exists: Celtic Cross and 1-to-5 vector
- * scoring are not built, and the Journal is a client-only sample list. The
+ * Pro-gated today: the user-scoped Journal API (/api/pro/journal*). Celtic
+ * Cross and 1-to-5 vector scoring are not built and have no endpoint. The
  * three-card spread is drawn and synthesized client-side with no endpoint.
  * When a Pro endpoint is added it must call requirePro/withPro and be listed
  * in PRO_GATED_ROUTES; free and paid one-time routes must never be gated.
@@ -33,7 +33,7 @@ import { Route as OrderRoute } from "~/routes/api/order.$orderId";
 const API_DIR = join(process.cwd(), "src/routes/api");
 
 /** Routes that must enforce Pro server-side (requirePro / withPro). */
-const PRO_GATED_ROUTES: string[] = [];
+const PRO_GATED_ROUTES: string[] = ["pro/journal.ts", "pro/journal.$entryId.ts"];
 
 /** Free or one-time-paid routes that must never require Pro. */
 const NEVER_PRO_GATED = [
@@ -58,8 +58,9 @@ function walk(dir: string): string[] {
 }
 
 const routeFiles = walk(API_DIR).map((p) => relative(API_DIR, p).split("\\").join("/"));
-const usesProGuard = (rel: string) =>
-  /\b(requirePro|withPro)\b/.test(readFileSync(join(API_DIR, rel), "utf8"));
+/** Direct guard use, or a handler module whose handlers are all wrapped in withPro. */
+const PRO_GUARD_PATTERN = /\b(requirePro|withPro)\b|~\/lib\/journal\/handlers/;
+const usesProGuard = (rel: string) => PRO_GUARD_PATTERN.test(readFileSync(join(API_DIR, rel), "utf8"));
 
 describe("Pro route inventory", () => {
   test("every route using the Pro guard is declared, and every declared route uses it", () => {

@@ -221,8 +221,9 @@ To exercise the real entitlement path locally, clear that key and run with
   *access* while the client decides *when a credit is spent*. Worst case a
   visitor under-spends their own credits. Closing it means generating readings
   server-side, which is a much larger refactor.
-- The Journal tab is a Pro-gated preview of sample entries. Stored readings
-  are still only `GET /api/order/<id>?include=readings`.
+- The Journal tab uses the Pro Journal API (below) when `VITE_PRO_UI_ENABLED`
+  is on; otherwise it is a DEV-only preview of sample entries. One-time order
+  readings are still `GET /api/order/<id>?include=readings`.
 - Tips stay honor-based on purpose. A tip unlocks nothing, so there is nothing
   to verify.
 - Pro is hidden in production and is not sold. The dev toggle is the only way
@@ -255,3 +256,22 @@ One-time orders and `/api/stripe-webhook` are unchanged.
 - Remaining edge: two Checkout tabs opened *before* either completes can both
   succeed. Pro stays correct (the guard keeps it active), but the customer is
   billed twice until one is cancelled in the portal.
+
+## Pro Journal API
+
+User-scoped, Pro-only. Every handler is wrapped in `withPro` (401 signed out,
+403 not Pro). Entries live in `journal_entries`
+(`migrations/0003_journal_entries.sql`, **not applied automatically**; run it
+with the unpooled URL after 0001 and 0002).
+
+| Method | Path | Result |
+| --- | --- | --- |
+| GET | `/api/pro/journal` | `200 { entries }`, own entries only, newest first, max 200 |
+| POST | `/api/pro/journal` | `201 { entry }`. Body `{ title (1-120), note? (<=4000), spread? (<=40), reading? (<=16 KB JSON) }` |
+| PATCH | `/api/pro/journal/:entryId` | `200 { entry }` or 404 |
+| DELETE | `/api/pro/journal/:entryId` | 204 or 404 |
+
+Every SQL statement filters on the session's `user_id`. Another user's entry id
+gets 404, and any `user_id` in the body is ignored. The Journal tab uses this
+API only when `VITE_PRO_UI_ENABLED=true`. With the flag off (the DEV toggle
+preview) it shows the sample entries and makes no calls.
