@@ -87,6 +87,7 @@ None are required to build or run the dev server. These matter at deploy time:
 | `DATABASE_URL` | runtime queries via `src/db.ts` | Neon Postgres connection string — resolved lazily, so the site builds & serves without it; only actual queries throw |
 | `STRIPE_WEBHOOK_SECRET` | `/api/stripe-webhook` | Stripe signing secret (`whsec_...`). Required for paid orders to flip to `paid` |
 | `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
+| `PRO_JOURNAL_ENABLED` | `/api/pro/journal*` | Server kill switch for the Pro Journal API. Default off (503 `journal_disabled`); `"true"` enables it. Independent of `VITE_PRO_UI_ENABLED`, which only hides the UI |
 | `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
 | `GEMINI_API_KEY` | `/api/gemini/v1beta/models/{model}:{operation}` | Server-only Gemini API key used by the proxy |
@@ -109,6 +110,10 @@ deploy; export the variables in the shell that runs `bun run go-live`.
 Pro UI visibility is controlled by the client build flag `VITE_PRO_UI_ENABLED`
 (default off; only `"true"` enables it). With it off, Pro stays hidden and
 `/api/pro/status` is never called. See PAYMENTS.md, "Where the flag lives".
+That flag only hides UI: the Journal API has its own server switch,
+`PRO_JOURNAL_ENABLED` (server env, default off, only `"true"` enables it).
+While it is off, `/api/pro/journal*` answers 503 `journal_disabled` for
+everyone, Pro users included.
 
 Create a local `.env` (gitignored) if you need any of these during development:
 

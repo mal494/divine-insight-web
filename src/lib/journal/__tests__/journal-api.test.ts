@@ -82,6 +82,7 @@ const del = (id: string) =>
   h(EntryRoute).DELETE({ params: { entryId: id }, request: new Request(url(`/${id}`), { method: "DELETE" }) });
 
 beforeEach(() => {
+  vi.stubEnv("PRO_JOURNAL_ENABLED", "true"); // server kill switch on; see journal-gate.test.ts
   mocks.rows.length = 0;
   mocks.queries.length = 0;
   mocks.userFromRequest.mockReset();

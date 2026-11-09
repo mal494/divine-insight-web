@@ -272,7 +272,15 @@ One-time orders and `/api/stripe-webhook` are unchanged.
 ## Pro Journal API
 
 User-scoped, Pro-only. Every handler is wrapped in `withPro` (401 signed out,
-403 not Pro). Entries live in `journal_entries`
+403 not Pro), and before that in a **server kill switch**:
+`PRO_JOURNAL_ENABLED` (server env, default off; only `"true"` enables it).
+While it is off, every journal route answers 503 `{ "error": "journal_disabled" }`
+before auth and before any DB access. This matters because
+`VITE_PRO_UI_ENABLED` only hides the Journal tab: a Pro user (or anyone with
+a Pro session) can still call `/api/pro/journal*` directly, so turning the
+UI flag off is **not** a rollback of the API. If `journal_entries` is missing
+(0003 not applied), the routes answer 503
+`{ "error": "journal_unavailable", "reason": "schema_not_migrated" }`, never 500. Entries live in `journal_entries`
 (`migrations/0003_journal_entries.sql`, **not applied automatically**; run it
 with the unpooled URL after 0001 and 0002).
 

@@ -8,6 +8,14 @@
  *   DELETE /api/pro/journal/:entryId   -> 204 | 404
  *
  * Another user's entry id returns 404 (indistinguishable from a missing one).
+ *
+ * Server kill switch (independent of the VITE_PRO_UI_ENABLED UI flag, which
+ * only hides the Journal tab and does NOT stop a Pro user calling these
+ * routes directly):
+ *   PRO_JOURNAL_ENABLED unset / anything but "true"
+ *     -> 503 { error: "journal_disabled" } before auth or any DB access.
+ *   journal_entries table missing (migration 0003 not applied, Postgres 42P01)
+ *     -> 503 { error: "journal_unavailable", reason: "schema_not_migrated" }.
  */
 import { guardJson, withPro, type ProGuardDeps } from "~/lib/auth/require-pro";
 import type { JournalInput, JournalPatch, JournalStore } from "./types";
@@ -60,13 +68,44 @@ function validate(body: Record<string, unknown>, partial: boolean): Parsed<Journ
   return { ok: true, value: out };
 }
 
+export const JOURNAL_MIGRATION = "migrations/0003_journal_entries.sql";
+
+/** Server-side switch for the Journal API. Default off; only the exact string "true" enables it. */
+export function isJournalApiEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env.PRO_JOURNAL_ENABLED === "true";
+}
+
+function isMissingTable(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "42P01" || code === "42703";
+}
+
 function failed(err: unknown): Response {
+  if (isMissingTable(err)) {
+    console.error(`journal_entries missing: apply ${JOURNAL_MIGRATION}`);
+    return guardJson({ error: "journal_unavailable", reason: "schema_not_migrated" }, 503);
+  }
   console.error("journal operation failed", err);
   return guardJson({ error: "unavailable" }, 503);
 }
 
-export function journalHandlers(store: () => JournalStore, guard?: ProGuardDeps) {
-  return {
+/** Wrap a handler so it answers 503 while PRO_JOURNAL_ENABLED is off (no auth, no DB). */
+function gated<A>(
+  enabled: () => boolean,
+  handler: (args: A) => Promise<Response>,
+): (args: A) => Promise<Response> {
+  return async (args) => {
+    if (!enabled()) return guardJson({ error: "journal_disabled" }, 503);
+    return handler(args);
+  };
+}
+
+export function journalHandlers(
+  store: () => JournalStore,
+  guard?: ProGuardDeps,
+  enabled: () => boolean = () => isJournalApiEnabled(),
+) {
+  const handlers = {
     list: withPro<{ request: Request }>(async ({ user }) => {
       try {
         return guardJson({ entries: await store().list(user.id) }, 200);
@@ -112,5 +151,11 @@ export function journalHandlers(store: () => JournalStore, guard?: ProGuardDeps)
         return failed(err);
       }
     }, guard),
+  };
+  return {
+    list: gated(enabled, handlers.list),
+    create: gated(enabled, handlers.create),
+    update: gated(enabled, handlers.update),
+    remove: gated(enabled, handlers.remove),
   };
 }
