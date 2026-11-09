@@ -19,15 +19,18 @@ scrolled past the CTA.
 1. Visitor clicks a CTA. The browser POSTs `{ sku }` to `/api/checkout` - a SKU
    key, never a price.
 2. `/api/checkout` opens a `pending` order, looks the price up in its own table
-   (`SKUS` in `src/lib/orders.ts`), and returns the Stripe payment link with
-   `?client_reference_id=<order id>` appended.
+   (`SKUS` in `src/lib/orders.ts`), and returns the Stripe payment link for the
+   current environment (`src/lib/payment-links.ts`) with
+   `?client_reference_id=<order id>` appended. It also returns a one-time
+   `accessToken` for the order (only its SHA-256 hash is stored); the browser
+   keeps it in localStorage and sends it as `x-order-token`.
 3. Visitor pays. Stripe POSTs either `checkout.session.completed` (most
    methods) or `checkout.session.async_payment_succeeded` (delayed methods) to
    `/api/stripe-webhook` with that `client_reference_id`.
 4. The webhook verifies the signature, checks `amount_total` against the SKU's
    price, and flips the order to `paid`.
-5. The section has been polling `/api/order/<id>`; it sees `paid` and unlocks
-   the draw.
+5. The section has been polling `/api/order/<id>` (with `x-order-token`); it
+   sees `paid` and unlocks the draw.
 6. When the cards are down, the page POSTs the reading to `/api/reading`, which
    spends one credit and stores it. The Reading Bundle is simply an order with
    three credits, and it unlocks the Extended Reading.
@@ -77,17 +80,60 @@ Set both before selling gifts.
 **A webhook endpoint in Stripe**
 
 - URL: `https://<your site>/api/stripe-webhook`
-- Events:
+- Events (all three are required):
   - `checkout.session.completed`
-  - `checkout.session.async_payment_succeeded`
+  - `checkout.session.async_payment_succeeded` (fulfilled exactly like `completed` once paid)
+  - `checkout.session.async_payment_failed` (moves the pending order to `failed`;
+    never grants credits or creates a gift link; idempotent; the order update
+    and the event record are one atomic statement, so a crash can't leave the
+    event "seen" with the order still pending; 2xx unless the DB errors)
 
-**Payment links**
+**Payment links (per environment)**
 
-The four links in `src/lib/payments.ts` are Stripe Payment Links. Appending
+The four one-time SKUs open Stripe Payment Links chosen on the server by
+`src/lib/payment-links.ts`:
+
+| Variable | SKU | Price |
+| --- | --- | --- |
+| `STRIPE_PAYMENT_LINK_SINGLE_INSIGHT` | `singleInsight` | 2.99 USD |
+| `STRIPE_PAYMENT_LINK_EXTENDED_READING` | `extendedReading` | 9.99 USD |
+| `STRIPE_PAYMENT_LINK_READING_BUNDLE` | `readingBundle` | 19.99 USD |
+| `STRIPE_PAYMENT_LINK_GIFT_READING` | `giftReading` | 5.00 USD |
+
+- **Production** (`VERCEL_ENV=production` only; `PAYMENT_LINKS_MODE=live`
+  anywhere else is refused with a 503, and `go-live.sh`'s non-`--prod` deploy
+  counts as a preview): the env var if set (must be a
+  live-mode `https://buy.stripe.com/…` link), otherwise the existing live link
+  baked into `LIVE_PAYMENT_LINK_DEFAULTS`.
+- **Preview, development, local**: the env var is required and must be a
+  TEST-mode link (`https://buy.stripe.com/test_…`). Unset or live-mode makes
+  `/api/checkout` answer 503 `checkout_unavailable` (and log which variable is
+  wrong) before any order is written. It never falls back to a live link.
+
+Tips are client-side links. Production builds use the live tip links; other
+builds read `VITE_STRIPE_TIP_LINK_3`, `VITE_STRIPE_TIP_LINK_5` and
+`VITE_STRIPE_TIP_LINK_10` (build-time, test-mode only) and hide the tip rail
+if any is missing. The build learns its environment from `VERCEL_ENV` via
+`vite.config.ts`.
+
+Appending
 `?client_reference_id=<uuid>` works on them out of the box - no dashboard change
 needed. Just do not edit a link's price in the dashboard without updating
 `SKUS`, because the webhook compares the two and refuses to fulfil on a
 mismatch.
+
+**Paid but unfulfillable sessions (orphan payments)**
+
+A Payment Link is a public URL, so someone can pay without going through
+`/api/checkout` (no `client_reference_id`). For a Gift Reading that means no
+order, no recipient email and no claim link. The webhook never drops these: a
+**paid** session with no order reference, an unknown order id, or an
+amount/currency mismatch is written to `orphan_payments` (idempotent on the
+Stripe session id; reason, payment link, amount, currency, buyer email) and
+logged as `ORPHAN_PAYMENT`. If that write fails the webhook answers 500 so
+Stripe retries. Per product policy these go to support for a manual reissue or
+refund; nothing is refunded automatically. Support query:
+`select * from orphan_payments where resolved_at is null order by created_at desc;`
 
 ## Testing it
 
@@ -104,7 +150,11 @@ End to end: open a reading, click the CTA, and pay with the
 seconds of the receipt, without a refresh.
 
 To check the gate actually holds, open `/api/order/<a made-up uuid>` - it must
-answer 404, and `/api/reading` with that id must answer 402. `/claim/<junk>`
+answer 404, and `/api/reading` with that id must answer 402. The same must hold
+for a real order id sent without its `x-order-token` (orders created before
+access tokens existed have no stored hash and are still readable by id until
+`LEGACY_ORDER_ACCESS_UNTIL`, an ISO date/time; unset = open, past or invalid =
+closed). `/claim/<junk>`
 must show the expired-link page.
 
 ### Unit tests
@@ -119,13 +169,27 @@ These tests mock `~/db`. They do not boot the dev server or hit `/api/stripe-web
 
 ## Database
 
-Four tables, created on first use (this template has no migration runner, so
-the schema bootstraps itself):
+The one-time payments schema comes **only** from
+`migrations/0004_payments_schema.sql` (no request runs DDL any more):
 
-- `orders` - one row per checkout attempt, with status and remaining credits
+- `orders` - one row per checkout attempt, with status (`pending`, `paid`,
+  `failed`) and remaining credits; `access_token_hash` is the SHA-256 of the
+  per-order access token
 - `readings` - every stored reading, keyed to its order (this is the journal)
 - `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
 - `gift_claims` - single-use claim tokens for Gift Readings
+- `orphan_payments` - paid Stripe sessions the webhook could not fulfil (see above)
+
+Apply it (with the unpooled URL) **before** deploying code that needs it. On
+Vercel, merging to `main` deploys production, so for production that means
+before merging. It is idempotent and safe to run while older code is live.
+
+Without it the code fails closed: checkout, order, reading and claim answer
+503 (`schema_not_migrated` where detectable), the webhook answers 5xx so Stripe
+retries, and `GET /api/health/payments` returns 503 listing what is missing
+(200 `{ ok: true }` when ready; read-only, no DDL). It is public, so it is
+rate-limited by caching: a 200 is cached per instance for 60 s, a 503 for 5 s,
+concurrent requests share one query, and errors are not cached.
 
 ## Divine Insight Pro
 

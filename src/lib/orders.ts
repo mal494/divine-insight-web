@@ -16,7 +16,7 @@
  */
 import { sql } from "~/db";
 
-/** The four paid SKUs. Keys match PAYMENT_LINKS in ~/lib/payments. */
+/** The four paid SKUs. Keys match PAYMENT_LINK_ENV in ~/lib/payment-links. */
 export type Sku =
   | "singleInsight"
   | "extendedReading"
@@ -47,11 +47,16 @@ export const SKUS: Record<Sku, SkuSpec> = {
   giftReading: { amountCents: 500, currency: "usd", credits: 1, kind: "gift" },
 };
 
+/**
+ * Own-property check, not `in`: `in` also walks the prototype chain, so keys
+ * like "toString", "constructor" or "__proto__" would pass and then fail the
+ * insert (credits = undefined) as a 503 instead of a clean 400.
+ */
 export function isSku(value: unknown): value is Sku {
-  return typeof value === "string" && value in SKUS;
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SKUS, value);
 }
 
-export type OrderStatus = "pending" | "paid" | "void";
+export type OrderStatus = "pending" | "paid" | "void" | "failed";
 
 export type Order = {
   id: string;
@@ -64,65 +69,29 @@ export type Order = {
 };
 
 /**
- * Create the tables on first use. Cheap enough to call per request (every
- * statement is `if not exists`) and it keeps the site deployable without a
- * separate migration step, which this template has no runner for.
+ * The schema (orders, readings, stripe_events, gift_claims, orphan_payments)
+ * comes only from migrations/0004_payments_schema.sql, applied before deploy.
+ * No request runs DDL. A missing table/column surfaces as Postgres 42P01/42703
+ * and the routes answer 503 (see isMissingSchemaError in ~/lib/order-access).
  */
-export async function ensureSchema(): Promise<void> {
-  const db = sql();
-  await db`
-    create table if not exists orders (
-      id                     uuid primary key,
-      sku                    text not null,
-      status                 text not null default 'pending',
-      credits                integer not null default 0,
-      amount_cents           integer not null,
-      amount_currency        text not null default 'usd',
-      stripe_session_id      text,
-      stripe_payment_intent  text,
-      recipient_email        text,
-      sender_name            text,
-      note                   text,
-      created_at             timestamptz not null default now(),
-      paid_at                timestamptz
-    )`;
-  await db`
-    alter table orders
-      add column if not exists amount_currency text not null default 'usd'`;
-  await db`
-    create table if not exists readings (
-      id          uuid primary key,
-      order_id    uuid not null references orders(id) on delete cascade,
-      payload     jsonb not null,
-      created_at  timestamptz not null default now()
-    )`;
-  await db`
-    create index if not exists readings_order_id_idx on readings (order_id)`;
-  // Stripe retries webhooks. Recording every event id we have already applied
-  // makes fulfilment idempotent: a replayed event is a no-op, not a second
-  // batch of credits.
-  await db`
-    create table if not exists stripe_events (
-      id           text primary key,
-      received_at  timestamptz not null default now()
-    )`;
-}
 
 /** Open a pending order. Returns the id we hand to Stripe as client_reference_id. */
 export async function createOrder(
   sku: Sku,
   gift?: { recipientEmail?: string; senderName?: string; note?: string },
+  access?: { accessTokenHash: string },
 ): Promise<string> {
-  await ensureSchema();
   const spec = SKUS[sku];
   const id = crypto.randomUUID();
   await sql()`
     insert into orders (
-      id, sku, status, credits, amount_cents, amount_currency, recipient_email, sender_name, note
+      id, sku, status, credits, amount_cents, amount_currency, recipient_email, sender_name, note,
+      access_token_hash
     )
     values (
       ${id}, ${sku}, 'pending', ${spec.credits}, ${spec.amountCents}, ${spec.currency},
-      ${gift?.recipientEmail ?? null}, ${gift?.senderName ?? null}, ${gift?.note ?? null}
+      ${gift?.recipientEmail ?? null}, ${gift?.senderName ?? null}, ${gift?.note ?? null},
+      ${access?.accessTokenHash ?? null}
     )`;
   return id;
 }
@@ -130,7 +99,6 @@ export async function createOrder(
 /** Read an order. Returns null for an unknown id — never throws on a bad id. */
 export async function getOrder(id: string): Promise<Order | null> {
   if (!isUuid(id)) return null;
-  await ensureSchema();
   const rows = await sql()`
     select id, sku, status, credits, amount_cents, amount_currency
       from orders
@@ -179,7 +147,6 @@ export async function markPaid(args: {
   | "amount-mismatch"
   | "currency-mismatch"
 > {
-  await ensureSchema();
   const db = sql();
 
   const duplicate = await db`
@@ -238,6 +205,52 @@ export async function markPaid(args: {
 }
 
 /**
+ * A delayed payment method (e.g. ACH) failed after checkout completed unpaid.
+ * Moves a still-pending order to `failed`; never grants credits, never touches
+ * a paid order. Idempotent on the Stripe event id and on the status guard.
+ */
+export async function markPaymentFailed(args: {
+  eventId: string;
+  orderId: string;
+  sessionId: string | null;
+}): Promise<"failed" | "duplicate" | "not-pending" | "unknown-order"> {
+  if (!isUuid(args.orderId)) return "unknown-order";
+  const db = sql();
+  // ONE statement, so it is atomic: the order update and the event record
+  // commit together or not at all. Recording the event first (separately)
+  // meant a crash between the two left the event "seen" and the order stuck
+  // in pending forever, because every Stripe retry answered "duplicate".
+  // The update only runs for an event we have not processed yet; the status
+  // guard (and the row lock it takes) keeps concurrent deliveries safe.
+  const rows = (await db`
+    with updated as (
+      update orders
+         set status = 'failed',
+             stripe_session_id = coalesce(stripe_session_id, ${args.sessionId})
+       where id = ${args.orderId}
+         and status = 'pending'
+         and not exists (select 1 from stripe_events where id = ${args.eventId})
+      returning id
+    ),
+    claimed as (
+      insert into stripe_events (id) values (${args.eventId})
+      on conflict (id) do nothing
+      returning id
+    )
+    select (select count(*) from updated)::int as updated,
+           (select count(*) from claimed)::int as claimed`) as Array<{
+    updated: number;
+    claimed: number;
+  }>;
+  const updated = Number(rows[0]?.updated ?? 0);
+  const claimed = Number(rows[0]?.claimed ?? 0);
+  if (updated > 0) return "failed";
+  if (claimed === 0) return "duplicate";
+  const order = await getOrder(args.orderId);
+  return order ? "not-pending" : "unknown-order";
+}
+
+/**
  * Spend one credit and store the reading against the order.
  *
  * Returns null when the order is unpaid or out of credits, so the caller can
@@ -250,7 +263,6 @@ export async function saveReading(
   payload: unknown,
 ): Promise<{ readingId: string; creditsLeft: number } | null> {
   if (!isUuid(orderId)) return null;
-  await ensureSchema();
   const db = sql();
 
   const readingId = crypto.randomUUID();
@@ -274,8 +286,7 @@ export async function saveReading(
       (select credits from spent) as credits_left`;
 
   const row = result[0] as
-    | { reading_id: string | null; credits_left: number | null }
-    | undefined;
+    { reading_id: string | null; credits_left: number | null } | undefined;
   if (!row?.reading_id || row.credits_left === null) return null;
   return { readingId: row.reading_id, creditsLeft: Number(row.credits_left) };
 }
@@ -285,7 +296,6 @@ export async function listReadings(
   orderId: string,
 ): Promise<{ id: string; payload: unknown; createdAt: string }[]> {
   if (!isUuid(orderId)) return [];
-  await ensureSchema();
   const rows = await sql()`
     select id, payload, created_at
       from readings
@@ -293,7 +303,11 @@ export async function listReadings(
      order by created_at desc`;
   return rows.map((r) => {
     const row = r as { id: string; payload: unknown; created_at: unknown };
-    return { id: row.id, payload: row.payload, createdAt: String(row.created_at) };
+    return {
+      id: row.id,
+      payload: row.payload,
+      createdAt: String(row.created_at),
+    };
   });
 }
 

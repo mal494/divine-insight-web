@@ -22,6 +22,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Sku } from "~/lib/payments";
 
 const STORAGE_PREFIX = "di.order.";
+/** The order's access token lives next to its id: `di.order.<sku>.token`. */
+const TOKEN_SUFFIX = ".token";
+/** Header the order endpoints read the access token from (~/lib/order-access). */
+export const ORDER_TOKEN_HEADER = "x-order-token";
+
+/** Headers for an order request; pre-token (legacy) orders send none. */
+export function orderTokenHeaders(token: string | null): Record<string, string> {
+  return token ? { [ORDER_TOKEN_HEADER]: token } : {};
+}
 const POLL_INTERVAL_MS = 3000;
 /** Stop polling after 20 minutes of a tab left open on the Stripe step. */
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -146,6 +155,63 @@ export function resolveEntitlementFromOrders(
   return { status: "locked", credits: 0, activeOrderId: null, settled: false };
 }
 
+export type CheckoutDeps = {
+  open: (url?: string, target?: string, features?: string) => CheckoutTabHandle | null;
+  fetch: (input: string, init?: RequestInit) => Promise<Response>;
+  assignCurrentTab: (url: string) => void;
+};
+
+export type CheckoutResult =
+  | { ok: true; orderId: string; accessToken: string | null }
+  | { ok: false };
+
+/**
+ * The checkout click, minus React state. The Stripe tab MUST be opened in the
+ * synchronous part of this function — before the first `await` — or the
+ * browser no longer treats it as part of the user's click and a popup blocker
+ * drops it after the order is already pending (issue #22). The tab is then
+ * navigated once /api/checkout answers, and closed if it fails.
+ */
+export async function runCheckout(
+  sku: Sku,
+  gift: GiftDetails | undefined,
+  deps: CheckoutDeps,
+): Promise<CheckoutResult> {
+  const { checkoutTab, popupBlocked } = openCheckoutTab(deps.open);
+  try {
+    const res = await deps.fetch("/api/checkout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sku,
+        recipientEmail: gift?.recipientEmail,
+        senderName: gift?.senderName,
+        note: gift?.note,
+      }),
+    });
+    if (!res.ok) {
+      checkoutTab?.close();
+      return { ok: false };
+    }
+    const { orderId, accessToken, url } = (await res.json()) as {
+      orderId: string;
+      accessToken?: string;
+      url: string;
+    };
+    // Fallback to same-tab only when a popup was actually blocked.
+    navigateCheckout({
+      checkoutTab,
+      popupBlocked,
+      url,
+      assignCurrentTab: deps.assignCurrentTab,
+    });
+    return { ok: true, orderId, accessToken: accessToken ?? null };
+  } catch {
+    checkoutTab?.close();
+    return { ok: false };
+  }
+}
+
 export function useEntitlement(
   primary: Sku,
   options?: { alsoAccept?: Sku[] },
@@ -158,6 +224,8 @@ export function useEntitlement(
   const skusRef = useRef<Sku[]>([primary, ...(options?.alsoAccept ?? [])]);
   /** The order currently holding credits — the one recordReading spends from. */
   const activeOrderId = useRef<string | null>(null);
+  /** Access tokens by order id, read from localStorage alongside the ids. */
+  const orderTokens = useRef<Map<string, string | null>>(new Map());
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAt = useRef<number>(0);
 
@@ -178,13 +246,20 @@ export function useEntitlement(
     for (const sku of skusRef.current) {
       const id = window.localStorage.getItem(STORAGE_PREFIX + sku);
       if (!id) continue;
+      const token = window.localStorage.getItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
+      orderTokens.current.set(id, token);
       let view: OrderView | null = null;
       try {
-        const res = await fetch(`/api/order/${id}`, { cache: "no-store" });
+        const res = await fetch(`/api/order/${id}`, {
+          cache: "no-store",
+          headers: orderTokenHeaders(token),
+        });
         if (res.status === 404) {
-          // The order no longer exists (database reset, stale id). Forget it
-          // rather than polling a ghost forever.
+          // The order no longer exists (database reset, stale id) or this
+          // browser no longer holds its token. Forget it rather than polling
+          // a ghost forever.
           window.localStorage.removeItem(STORAGE_PREFIX + sku);
+          window.localStorage.removeItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
           continue;
         }
         if (!res.ok) continue;
@@ -231,43 +306,32 @@ export function useEntitlement(
   const startCheckout = useCallback(
     async (opts?: CheckoutOptions) => {
       const sku = opts?.sku ?? primary;
-      // Open synchronously inside the click gesture; we navigate it once the
-      // checkout session URL comes back from the server.
-      const { checkoutTab, popupBlocked } = openCheckoutTab(window.open.bind(window));
+      // runCheckout opens the tab synchronously, inside this click gesture,
+      // before its first await (issue #22).
+      const pending = runCheckout(sku, opts, {
+        open: window.open.bind(window),
+        fetch: window.fetch.bind(window),
+        assignCurrentTab: window.location.assign.bind(window.location),
+      });
       setBusy(true);
       try {
-        const res = await fetch("/api/checkout", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            sku,
-            recipientEmail: opts?.recipientEmail,
-            senderName: opts?.senderName,
-            note: opts?.note,
-          }),
-        });
-        if (!res.ok) {
-          checkoutTab?.close();
+        const result = await pending;
+        if (!result.ok) {
           setStatus("unavailable");
           return;
         }
-        const { orderId, url } = (await res.json()) as {
-          orderId: string;
-          url: string;
-        };
+        const { orderId, accessToken } = result;
         window.localStorage.setItem(STORAGE_PREFIX + sku, orderId);
+        if (accessToken) {
+          window.localStorage.setItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX, accessToken);
+        } else {
+          window.localStorage.removeItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
+        }
+        orderTokens.current.set(orderId, accessToken);
         if (!skusRef.current.includes(sku)) skusRef.current.push(sku);
         setStatus("awaiting-payment");
-        // Fallback only when a popup was actually blocked.
-        navigateCheckout({
-          checkoutTab,
-          popupBlocked,
-          url,
-          assignCurrentTab: window.location.assign.bind(window.location),
-        });
         beginPolling();
       } catch {
-        checkoutTab?.close();
         setStatus("unavailable");
       } finally {
         setBusy(false);
@@ -283,7 +347,10 @@ export function useEntitlement(
       try {
         const res = await fetch("/api/reading", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...orderTokenHeaders(orderTokens.current.get(id) ?? null),
+          },
           body: JSON.stringify({ orderId: id, reading }),
         });
         if (res.ok) {

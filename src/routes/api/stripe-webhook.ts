@@ -18,7 +18,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { claimUrlFor, sendGiftEmail } from "~/lib/gift-email";
 import { createGiftClaim, getGiftDetails } from "~/lib/gifts";
-import { markPaid } from "~/lib/orders";
+import { markPaid, markPaymentFailed } from "~/lib/orders";
+import { recordOrphanPayment, type OrphanReason } from "~/lib/orphan-payments";
 import { verifyStripeSignature } from "~/lib/stripe-signature";
 
 export const Route = createFileRoute("/api/stripe-webhook")({
@@ -56,6 +57,10 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     return new Response("invalid json", { status: 400 });
   }
 
+  if (event.type === "checkout.session.async_payment_failed") {
+    return handleAsyncPaymentFailed(event);
+  }
+
   if (
     event.type !== "checkout.session.completed" &&
     event.type !== "checkout.session.async_payment_succeeded"
@@ -67,8 +72,12 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   const orderId = session.client_reference_id;
   if (!orderId) {
     // A payment link opened directly, without going through /api/checkout.
-    // Real money, no order to attach it to — worth a log line.
+    // Real money, no order (for a gift: no recipient, no claim link). Record
+    // it for support instead of dropping it; see ~/lib/orphan-payments.
     console.warn("paid session with no client_reference_id:", session.id);
+    if (session.payment_status === "paid") {
+      return orphan(event, "no-order-reference", "no order reference");
+    }
     return new Response("no order reference", { status: 200 });
   }
 
@@ -78,11 +87,21 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     console.warn("session not paid:", session.id, session.payment_status);
     return new Response("not paid", { status: 200 });
   }
-  if (typeof session.amount_total !== "number" || !Number.isFinite(session.amount_total)) {
-    console.warn("session missing amount_total:", session.id, session.amount_total);
+  if (
+    typeof session.amount_total !== "number" ||
+    !Number.isFinite(session.amount_total)
+  ) {
+    console.warn(
+      "session missing amount_total:",
+      session.id,
+      session.amount_total,
+    );
     return new Response("invalid amount", { status: 200 });
   }
-  if (typeof session.currency !== "string" || session.currency.trim().length === 0) {
+  if (
+    typeof session.currency !== "string" ||
+    session.currency.trim().length === 0
+  ) {
     console.warn("session missing currency:", session.id, session.currency);
     return new Response("invalid currency", { status: 200 });
   }
@@ -96,9 +115,13 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     currency: session.currency.toLowerCase(),
   });
 
-  if (result !== "applied" && result !== "duplicate" && result !== "already-paid") {
+  if (
+    result !== "applied" &&
+    result !== "duplicate" &&
+    result !== "already-paid"
+  ) {
     console.error("fulfilment refused:", result, orderId, session.id);
-    return new Response(result, { status: 200 });
+    return orphan(event, result, result);
   }
 
   // A paid gift is the one SKU with something to deliver. Mint the claim
@@ -123,6 +146,62 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   return new Response(result, { status: 200 });
 }
 
+/**
+ * A delayed payment (bank debit etc.) failed. The order was never paid, so
+ * there is nothing to revoke: move it from pending to failed so the buyer's
+ * page stops waiting, and never grant credits or mint a gift link. Idempotent;
+ * always 2xx (a retry cannot change the outcome).
+ */
+async function handleAsyncPaymentFailed(event: StripeEvent): Promise<Response> {
+  const session = event.data?.object ?? {};
+  const orderId = session.client_reference_id;
+  if (!orderId) return new Response("no order reference", { status: 200 });
+  const result = await markPaymentFailed({
+    eventId: event.id,
+    orderId,
+    sessionId: session.id ?? null,
+  });
+  if (result !== "failed") {
+    console.warn(
+      "async payment failed, order not updated:",
+      result,
+      orderId,
+      session.id,
+    );
+  }
+  return new Response(`payment-failed:${result}`, { status: 200 });
+}
+
+/**
+ * Paid but unfulfillable: persist it for manual reissue/refund. 200 once
+ * recorded (a retry can never fix it); 500 if the record could not be written,
+ * so Stripe retries until it is.
+ */
+async function orphan(
+  event: StripeEvent,
+  reason: OrphanReason,
+  body: string,
+): Promise<Response> {
+  const s = event.data?.object ?? {};
+  try {
+    await recordOrphanPayment({
+      sessionId: s.id ?? event.id,
+      eventId: event.id,
+      reason,
+      orderRef: s.client_reference_id ?? null,
+      paymentLink: s.payment_link ?? null,
+      paymentIntent: s.payment_intent ?? null,
+      amountCents: typeof s.amount_total === "number" ? s.amount_total : null,
+      currency: s.currency ?? null,
+      customerEmail: s.customer_details?.email ?? null,
+    });
+  } catch (err) {
+    console.error("could not record orphan payment", s.id, err);
+    return new Response("orphan record failed", { status: 500 });
+  }
+  return new Response(body, { status: 200 });
+}
+
 /** The slice of Stripe's event shape this endpoint reads. */
 type StripeEvent = {
   id: string;
@@ -135,6 +214,8 @@ type StripeEvent = {
       payment_status?: string;
       amount_total?: number;
       currency?: string;
+      payment_link?: string | null;
+      customer_details?: { email?: string | null } | null;
     };
   };
 };

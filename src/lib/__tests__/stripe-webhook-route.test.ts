@@ -22,6 +22,10 @@ vi.mock("~/lib/gifts", () => ({
   createGiftClaim: mocks.createGiftClaim,
 }));
 
+vi.mock("~/lib/orphan-payments", () => ({
+  recordOrphanPayment: vi.fn().mockResolvedValue(true),
+}));
+
 vi.mock("~/lib/gift-email", () => ({
   sendGiftEmail: mocks.sendGiftEmail,
   claimUrlFor: mocks.claimUrlFor,

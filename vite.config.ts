@@ -5,6 +5,12 @@ import { defineConfig } from "vite";
 import tsConfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
+  // Which deployment this bundle is for ("production" | "preview" |
+  // "development" on Vercel; empty locally). Client code uses it to pick
+  // live vs test-mode Stripe tip links (see resolveTipLinks in lib/payments).
+  define: {
+    "import.meta.env.VITE_DEPLOY_ENV": JSON.stringify(process.env.VERCEL_ENV ?? ""),
+  },
   server: {
     port: 3000,
     host: true,
