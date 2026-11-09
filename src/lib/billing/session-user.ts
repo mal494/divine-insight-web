@@ -1,14 +1,38 @@
-/** Resolve the signed-in user from a raw Request (API routes). */
-export async function userFromRequest(request: Request): Promise<{ id: string; email: string } | null> {
+export class SessionLookupError extends Error {
+  constructor(cause: unknown) {
+    super("session lookup failed");
+    this.name = "SessionLookupError";
+    (this as { cause?: unknown }).cause = cause;
+  }
+}
+
+type GetSession = (headers: Headers) => Promise<{ user: { id: string; email: string } } | null>;
+
+async function defaultGetSession(headers: Headers) {
+  const { getAuth } = await import("~/lib/auth/auth");
+  return getAuth().api.getSession({ headers });
+}
+
+/**
+ * Resolve the signed-in user from a raw Request (API routes).
+ *
+ * Returns null only when there is genuinely no session (or auth isn't
+ * configured). A DB/auth outage THROWS SessionLookupError so callers answer
+ * 503, not a misleading 401 "sign in".
+ */
+export async function userFromRequest(
+  request: Request,
+  getSession: GetSession = defaultGetSession,
+): Promise<{ id: string; email: string } | null> {
   if (!process.env.DATABASE_URL || !process.env.BETTER_AUTH_SECRET) return null;
+  let s: Awaited<ReturnType<GetSession>>;
   try {
-    const { getAuth } = await import("~/lib/auth/auth");
-    const s = await getAuth().api.getSession({ headers: request.headers });
-    return s ? { id: s.user.id, email: s.user.email } : null;
+    s = await getSession(request.headers);
   } catch (err) {
     console.error("getSession failed", err);
-    return null;
+    throw new SessionLookupError(err);
   }
+  return s ? { id: s.user.id, email: s.user.email } : null;
 }
 
 export function originOf(request: Request): string {

@@ -154,17 +154,48 @@ tab is still the five-card spread in `src/components/extended-reading.tsx`.
 ### Where the flag lives
 
 `SubscriptionProvider` (`src/context/SubscriptionContext.tsx`) wraps the app
-from `src/routes/__root.tsx`.
+from `src/routes/__root.tsx`. Status is resolved by
+`resolvePremiumStatus` (`src/lib/pro/resolve-status.ts`):
 
-- Production builds never read `localStorage`. `verifyPremiumStatus` returns
-  false, and `setIsPremium` / `togglePremium` leave the flag off.
-- In `import.meta.env.DEV` only, the flag is `localStorage["di.subscription.isPremium"] === "true"`.
-  During SSR (`window` is missing) it is false.
-- `PremiumDevToggle` renders only in dev (bottom-right **Pro: On / Off**).
-  Checkout does not call `setIsPremium`.
+1. **DEV builds only:** an explicit `localStorage["di.subscription.isPremium"]`
+   of `"true"` / `"false"` (set by `PremiumDevToggle`, bottom-right
+   **Pro: On / Off**) wins. Production builds never read it.
+2. **`VITE_PRO_UI_ENABLED` off (default):** `isPremium` is false and
+   `GET /api/pro/status` is never called. This is how production keeps Pro
+   hidden. Only the exact string `"true"` turns it on; Vite inlines it at
+   build time, so changing it needs a rebuild.
+3. **Flag on:** the provider calls `GET /api/pro/status` (same-origin, with the
+   session cookie). `isPremium` is true only for a 200 with `pro: true`.
+   Signed out (401), errors and malformed bodies are all false.
 
-Setting the localStorage key in a production build does nothing. Pro is not
-access control and it is not for sale on the site.
+During SSR `isPremium` is false and `loading` is true, so gated markup is never
+server-rendered.
+
+### Server-side enforcement
+
+The UI flag is presentation only. Access is enforced on the server:
+
+- `GET /api/pro/status` returns `{ signedIn, pro }` from `hasPro(user.id)`:
+  401 signed out, 200 signed in, 503 if the lookup fails (fails closed).
+- `requirePro(request)` / `withPro(handler)` in `src/lib/auth/require-pro.ts`
+  is the guard every Pro-only API route must use: 401 `sign_in_required`
+  when signed out, 403 `pro_required` when not Pro, 503
+  `session_unavailable` if the session lookup throws (DB/auth outage), and 503
+  `entitlement_unavailable` if the entitlement lookup throws.
+  `userFromRequest` throws on lookup errors rather than returning null, so an
+  outage is never reported as "sign in".
+- `src/lib/pro/__tests__/pro-route-inventory.test.ts` classifies every API
+  route, including what it imports directly from `~/lib`, and every
+  `createServerFn` module. Each one is Pro-gated, Pro-aware (reads `hasPro` but
+  isn't gated: checkout and status), or never gated (paid one-time readings,
+  gifts, webhooks, auth, portal, the Gemini proxy). Any unclassified entry
+  point, or a `requirePro`/`withPro`/`hasPro` reference that doesn't match its
+  classification, fails CI.
+
+There are no Pro-only server operations yet: Celtic Cross and vector scoring
+are not built, the Journal is client-only sample entries, and the three-card
+spread is drawn client-side with no endpoint. `PRO_GATED_ROUTES` is empty
+until one of those gets a server endpoint.
 
 ### Checkout scaffold
 
@@ -186,6 +217,9 @@ bun run dev
 Use **Pro: On** in the corner to preview the three-card section and Journal.
 The choice persists in this browser under `di.subscription.isPremium` for dev
 builds only. A production build has no toggle and no upgrade button.
+
+To exercise the real entitlement path locally, clear that key and run with
+`VITE_PRO_UI_ENABLED=true bun run dev` while signed in.
 
 ## Still to do
 
@@ -210,3 +244,27 @@ Entitlements are written only by `POST /api/stripe-subscription-webhook`
 `invoice.paid` and `invoice.payment_failed`, dedupes by event id, and re-fetches the
 subscription from Stripe. Apply `migrations/0002_pro_subscriptions.sql` first.
 One-time orders and `/api/stripe-webhook` are unchanged.
+
+### Double-subscription protection
+
+- `POST /api/pro/checkout` returns **409** `{ error: "already_subscribed", manage: "/api/pro/portal" }`
+  when the user already has Pro (`hasPro`: active / trialing / past_due within
+  the period), so no second Checkout Session is created.
+- `syncSubscription` only lets an event for a subscription that is *not* the one
+  stored on the entitlement row overwrite it if that event grants access, or
+  the stored one has already lapsed. Otherwise it returns `"superseded"` and
+  leaves the row alone.
+- When a subscription stops granting access, the webhook first asks Stripe
+  (`GET /v1/subscriptions?customer=…&status=all`) for another active Pro
+  subscription on the same customer and syncs that one instead of revoking.
+  If that lookup fails, the revoke still proceeds (the DB guard above still applies).
+- **One Stripe Customer per user, created before the first Checkout.**
+  `ensureStripeCustomer` creates the customer server-side (`POST /v1/customers`
+  with a per-user `Idempotency-Key`) and stores it on the entitlement row with
+  status `incomplete`, which does not grant Pro. Every Checkout passes
+  `customer=`. Concurrent tabs therefore share one customer, so the webhook's
+  "other active subscription for this customer" check and the Customer Portal
+  both see every subscription.
+- Remaining edge: two Checkout tabs opened *before* either completes can still
+  both be paid. Pro stays correct, and the customer can cancel the extra one in
+  the Portal, because both subscriptions sit on the same customer.
