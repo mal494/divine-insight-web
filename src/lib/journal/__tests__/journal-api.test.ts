@@ -117,6 +117,18 @@ describe("Journal API auth", () => {
   });
 });
 
+describe("Journal API during a session outage", () => {
+  test("503 session_unavailable (not 401), no DB access", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.userFromRequest.mockRejectedValue(new Error("db down"));
+    const res = await list();
+    spy.mockRestore();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "session_unavailable" });
+    expect(mocks.queries).toHaveLength(0);
+  });
+});
+
 describe("Journal API for Pro users", () => {
   test("create, list, update, delete own entries", async () => {
     as("alice");

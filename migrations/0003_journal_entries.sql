@@ -1,5 +1,7 @@
 -- Pro Journal: user-scoped entries. NOT applied automatically. Apply after 0001/0002:
 --   psql "$DATABASE_URL_UNPOOLED" -f migrations/0003_journal_entries.sql
+-- Rollback (destroys all journal entries):
+--   drop table if exists journal_entries;
 -- Every query in src/lib/journal/store.ts filters by user_id, so a user can
 -- only ever read or change their own rows.
 begin;

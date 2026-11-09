@@ -3,7 +3,8 @@
  *
  *   signed out -> 401 { signedIn: false, pro: false }
  *   signed in  -> 200 { signedIn: true, pro: <hasPro(user.id)> }
- *   lookup error -> 503 { error: "entitlement_unavailable", pro: false }
+ *   session lookup error -> 503 { error: "session_unavailable", pro: false }
+ *   entitlement lookup error -> 503 { error: "entitlement_unavailable", pro: false }
  *
  * This reports the truth from the entitlements table. Whether the Pro UI is
  * shown at all is a separate client build flag (VITE_PRO_UI_ENABLED, see
@@ -24,7 +25,13 @@ export async function handleProStatus(
   request: Request,
   deps: ProGuardDeps = defaultDeps,
 ): Promise<Response> {
-  const user = await deps.getUser(request);
+  let user: { id: string; email: string } | null;
+  try {
+    user = await deps.getUser(request);
+  } catch (err) {
+    console.error("session lookup failed", err);
+    return guardJson({ error: "session_unavailable", pro: false }, 503);
+  }
   if (!user) return guardJson({ signedIn: false, pro: false } satisfies ProStatusBody, 401);
   try {
     const pro = await deps.checkPro(user.id);

@@ -6,6 +6,7 @@
  *
  *   - no session          -> 401 { error: "sign_in_required" }
  *   - signed in, not Pro  -> 403 { error: "pro_required" }
+ *   - session lookup fails -> 503 { error: "session_unavailable" }
  *   - entitlement lookup fails -> 503 { error: "entitlement_unavailable" }
  *     (fail closed: a DB outage never grants Pro)
  *
@@ -46,7 +47,13 @@ export async function requirePro(
   request: Request,
   deps: ProGuardDeps = defaultDeps,
 ): Promise<ProGuardResult> {
-  const user = await deps.getUser(request);
+  let user: ProUser | null;
+  try {
+    user = await deps.getUser(request);
+  } catch (err) {
+    console.error("session lookup failed", err);
+    return { ok: false, response: guardJson({ error: "session_unavailable" }, 503) };
+  }
   if (!user) return { ok: false, response: guardJson({ error: "sign_in_required" }, 401) };
 
   let pro: boolean;

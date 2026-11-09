@@ -34,11 +34,47 @@ export async function getStripeCustomerId(userId: string, db: Queryable): Promis
   return rows[0]?.stripe_customer_id ?? null;
 }
 
+/**
+ * The user's single Stripe Customer, created server-side BEFORE their first
+ * Checkout and stored on the entitlement row (status 'incomplete', which does
+ * not grant Pro). Every Checkout then passes `customer`, so concurrent tabs
+ * share one customer: the webhook's "other active subscription for this
+ * customer" check and the Customer Portal both see every subscription.
+ *
+ * Concurrency: the Stripe call uses a per-user Idempotency-Key, so two tabs
+ * racing within Stripe's 24h idempotency window get the same customer; the DB
+ * write keeps whichever customer was stored first (coalesce) and we use that.
+ */
+export async function ensureStripeCustomer(
+  args: { userId: string; email: string; db: Queryable },
+  fetchImpl?: FetchLike,
+): Promise<string> {
+  const existing = await getStripeCustomerId(args.userId, args.db);
+  if (existing) return existing;
+  const created = await stripeRequest<{ id: string }>(
+    "POST",
+    "/customers",
+    { email: args.email, metadata: { user_id: args.userId } },
+    fetchImpl,
+    { idempotencyKey: `di-pro-customer:${args.userId}:${args.email.toLowerCase()}` },
+  );
+  const { rows } = await args.db.query(
+    `insert into entitlements (user_id, plan, status, stripe_customer_id, updated_at)
+     values ($1, 'pro', 'incomplete', $2, now())
+     on conflict (user_id, plan) do update set
+       stripe_customer_id = coalesce(entitlements.stripe_customer_id, excluded.stripe_customer_id),
+       updated_at = now()
+     returning stripe_customer_id`,
+    [args.userId, created.id],
+  );
+  return rows[0]?.stripe_customer_id ?? created.id;
+}
+
 export async function createProCheckoutSession(
   args: { userId: string; email: string; origin: string; db: Queryable },
   fetchImpl?: FetchLike,
 ): Promise<string> {
-  const customer = await getStripeCustomerId(args.userId, args.db);
+  const customer = await ensureStripeCustomer(args, fetchImpl);
   const session = await stripeRequest<{ url: string }>(
     "POST",
     "/checkout/sessions",
@@ -46,8 +82,7 @@ export async function createProCheckoutSession(
       mode: "subscription",
       line_items: { 0: { price: proPriceId(), quantity: 1 } },
       client_reference_id: args.userId,
-      customer: customer ?? undefined,
-      customer_email: customer ? undefined : args.email,
+      customer,
       metadata: { user_id: args.userId, plan: "pro" },
       subscription_data: { metadata: { user_id: args.userId, plan: "pro" } },
       success_url: `${args.origin}/?pro=activating`,

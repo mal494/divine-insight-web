@@ -16,11 +16,12 @@ describe("encodeForm", () => {
 });
 
 describe("createProCheckoutSession", () => {
-  test("subscription mode with price from env and user reference", async () => {
-    const db = { query: vi.fn(async () => ({ rows: [] })) };
+  test("subscription mode with price from env, user reference and the stored customer", async () => {
+    const db = { query: vi.fn(async () => ({ rows: [{ stripe_customer_id: "cus_1" }] })) };
     const fetchImpl = vi.fn(async (_u: string, _i?: RequestInit) => okJson({ url: "https://checkout.stripe.com/x" }));
     const url = await createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "https://s", db }, fetchImpl);
     expect(url).toBe("https://checkout.stripe.com/x");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
     const [u, init] = fetchImpl.mock.calls[0];
     expect(u).toBe("https://api.stripe.com/v1/checkout/sessions");
     const body = decodeURIComponent(String(init?.body));
@@ -28,13 +29,108 @@ describe("createProCheckoutSession", () => {
     expect(body).toContain("line_items[0][price]=price_pro");
     expect(body).toContain("client_reference_id=u1");
     expect(body).toContain("subscription_data[metadata][user_id]=u1");
-    expect(body).toContain("customer_email=a@b.c");
+    expect(body).toContain("customer=cus_1");
+    expect(body).not.toContain("customer_email");
     expect(body).not.toContain("trial");
   });
   test("throws without STRIPE_PRO_PRICE_ID", async () => {
     delete process.env.STRIPE_PRO_PRICE_ID;
-    const db = { query: vi.fn(async () => ({ rows: [] })) };
+    const db = { query: vi.fn(async () => ({ rows: [{ stripe_customer_id: "cus_1" }] })) };
     await expect(createProCheckoutSession({ userId: "u1", email: "e", origin: "o", db }, vi.fn())).rejects.toThrow();
+  });
+});
+
+describe("Stripe customer created before the first checkout", () => {
+  /** Fake entitlements table: one row per user, coalescing stripe_customer_id like the SQL. */
+  function custDb() {
+    const rows = new Map<string, { status: string; stripe_customer_id: string | null }>();
+    const query = vi.fn(async (q: string, v: unknown[]) => {
+      if (q.startsWith("select stripe_customer_id")) {
+        const r = rows.get(v[0] as string);
+        return { rows: r?.stripe_customer_id ? [{ stripe_customer_id: r.stripe_customer_id }] : [] };
+      }
+      if (q.includes("insert into entitlements") && q.includes("'incomplete'")) {
+        expect(q).toMatch(/coalesce\(entitlements\.stripe_customer_id, excluded\.stripe_customer_id\)/);
+        const cur = rows.get(v[0] as string);
+        const id = cur?.stripe_customer_id ?? (v[1] as string);
+        rows.set(v[0] as string, { status: cur?.status ?? "incomplete", stripe_customer_id: id });
+        return { rows: [{ stripe_customer_id: id }] };
+      }
+      return { rows: [] };
+    });
+    return { db: { query }, rows };
+  }
+  /** Fake Stripe: honours Idempotency-Key on POST /customers like Stripe does. */
+  function fakeStripe() {
+    const byKey = new Map<string, string>();
+    let n = 0;
+    const customerCalls: RequestInit[] = [];
+    const sessionBodies: string[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/v1/customers")) {
+        customerCalls.push(init!);
+        const key = (init?.headers as Record<string, string>)["idempotency-key"];
+        if (!byKey.has(key)) byKey.set(key, `cus_${++n}`);
+        return okJson({ id: byKey.get(key) });
+      }
+      sessionBodies.push(decodeURIComponent(String(init?.body)));
+      return okJson({ url: `https://checkout.stripe.com/${sessionBodies.length}` });
+    });
+    return { fetchImpl, customerCalls, sessionBodies };
+  }
+
+  test("first checkout creates the customer, stores it as a non-granting row, and checks out with it", async () => {
+    const { db, rows } = custDb();
+    const s = fakeStripe();
+    await createProCheckoutSession({ userId: "u1", email: "A@b.c", origin: "o", db }, s.fetchImpl);
+    expect(s.customerCalls).toHaveLength(1);
+    const headers = s.customerCalls[0].headers as Record<string, string>;
+    expect(headers["idempotency-key"]).toBe("di-pro-customer:u1:a@b.c");
+    expect(decodeURIComponent(String(s.customerCalls[0].body))).toContain("metadata[user_id]=u1");
+    expect(rows.get("u1")).toEqual({ status: "incomplete", stripe_customer_id: "cus_1" });
+    expect(s.sessionBodies[0]).toContain("customer=cus_1");
+    expect(s.sessionBodies[0]).not.toContain("customer_email");
+  });
+
+  test("two concurrent checkout tabs share ONE customer", async () => {
+    const { db } = custDb();
+    const s = fakeStripe();
+    await Promise.all([
+      createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "o", db }, s.fetchImpl),
+      createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "o", db }, s.fetchImpl),
+    ]);
+    expect(s.sessionBodies).toHaveLength(2);
+    for (const b of s.sessionBodies) expect(b).toContain("customer=cus_1");
+  });
+
+  test("if another tab stored a customer first, the stored one wins", async () => {
+    const { db, rows } = custDb();
+    const s = fakeStripe();
+    // Simulate a racing tab committing cus_other between our read and write.
+    const realQuery = db.query.getMockImplementation()!;
+    db.query.mockImplementation(async (q: string, v: unknown[]) => {
+      if (q.includes("'incomplete'") && !rows.has("u1")) rows.set("u1", { status: "incomplete", stripe_customer_id: "cus_other" });
+      return realQuery(q, v);
+    });
+    await createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "o", db }, s.fetchImpl);
+    expect(s.sessionBodies[0]).toContain("customer=cus_other");
+  });
+
+  test("an existing customer is reused without calling Stripe /customers", async () => {
+    const { db, rows } = custDb();
+    rows.set("u1", { status: "canceled", stripe_customer_id: "cus_old" });
+    const s = fakeStripe();
+    await createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "o", db }, s.fetchImpl);
+    expect(s.customerCalls).toHaveLength(0);
+    expect(s.sessionBodies[0]).toContain("customer=cus_old");
+  });
+
+  test("the pre-created 'incomplete' row does not grant Pro", async () => {
+    const { hasPro } = await import("~/lib/auth/entitlements");
+    const db = { query: vi.fn(async (_q: string, _v: unknown[]) => ({ rows: [] as unknown[] })) };
+    await hasPro("u1", db);
+    expect(db.query.mock.calls[0][0]).toMatch(/status in \('active', 'trialing', 'past_due'\)/);
+    expect(db.query.mock.calls[0][0]).not.toMatch(/incomplete/);
   });
 });
 

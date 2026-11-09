@@ -8,7 +8,12 @@ export const Route = createFileRoute("/api/pro/portal")({
   server: {
     handlers: {
       POST: async ({ request }) => {
-        const user = await userFromRequest(request);
+        let user: { id: string; email: string } | null;
+        try {
+          user = await userFromRequest(request);
+        } catch {
+          return json({ error: "session_unavailable" }, 503);
+        }
         if (!user) return json({ error: "sign_in_required" }, 401);
         try {
           const url = await createPortalSession({ userId: user.id, origin: originOf(request), db: getAuthPool() });
