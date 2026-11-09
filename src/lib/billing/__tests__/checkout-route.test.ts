@@ -47,4 +47,14 @@ describe("POST /api/pro/checkout", () => {
     expect(res.status).toBe(503);
     expect(d.createSession).not.toHaveBeenCalled();
   });
+
+  test("503 session_unavailable (not 401) when the session lookup throws", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = deps({ getUser: vi.fn(async () => { throw new Error("db down"); }) });
+    const res = await handleProCheckout(req(), d);
+    spy.mockRestore();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "session_unavailable" });
+    expect(d.createSession).not.toHaveBeenCalled();
+  });
 });

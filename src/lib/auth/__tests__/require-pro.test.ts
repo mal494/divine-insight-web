@@ -49,6 +49,20 @@ describe("requirePro", () => {
   });
 });
 
+describe("requirePro session outage", () => {
+  test("503 session_unavailable (not 401) when the session lookup throws", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = deps({ getUser: vi.fn(async () => { throw new Error("db down"); }) });
+    const r = await requirePro(req(), d);
+    spy.mockRestore();
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.response.status).toBe(503);
+    expect(await r.response.json()).toEqual({ error: "session_unavailable" });
+    expect(d.checkPro).not.toHaveBeenCalled();
+  });
+});
+
 describe("withPro", () => {
   const handler = vi.fn(async ({ user: u }: { request: Request; user: { id: string } }) =>
     new Response(JSON.stringify({ hello: u.id }), { status: 200 }),

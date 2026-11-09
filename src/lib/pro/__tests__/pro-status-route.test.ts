@@ -60,6 +60,15 @@ describe("GET /api/pro/status", () => {
     expect((await res.json()).pro).toBe(false);
   });
 
+  test("503 session_unavailable (not 401) when the session lookup throws", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mocks.userFromRequest.mockRejectedValue(new Error("db down"));
+    const res = await handleProStatus(req());
+    spy.mockRestore();
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "session_unavailable", pro: false });
+  });
+
   test("the registered route uses the session from the request", async () => {
     mocks.userFromRequest.mockResolvedValue({ id: "u2", email: "p@b.c" });
     mocks.hasPro.mockResolvedValue(true);

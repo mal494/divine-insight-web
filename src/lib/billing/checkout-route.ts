@@ -27,7 +27,13 @@ const defaultDeps: CheckoutDeps = {
 };
 
 export async function handleProCheckout(request: Request, deps: CheckoutDeps = defaultDeps): Promise<Response> {
-  const user = await deps.getUser(request);
+  let user: { id: string; email: string } | null;
+  try {
+    user = await deps.getUser(request);
+  } catch (err) {
+    console.error("session lookup failed", err);
+    return json({ error: "session_unavailable" }, 503);
+  }
   if (!user) return json({ error: "sign_in_required" }, 401);
   try {
     if (await deps.checkPro(user.id)) {

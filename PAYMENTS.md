@@ -180,11 +180,17 @@ The UI flag is presentation only. Access is enforced on the server:
 - `requirePro(request)` / `withPro(handler)` in `src/lib/auth/require-pro.ts`
   is the guard every Pro-only API route must use: 401 `sign_in_required`
   when signed out, 403 `pro_required` when not Pro, 503
+  `session_unavailable` if the session lookup throws (DB/auth outage), and 503
   `entitlement_unavailable` if the entitlement lookup throws.
-- `src/lib/pro/__tests__/pro-route-inventory.test.ts` lists the gated routes
-  (`PRO_GATED_ROUTES`) and the routes that must never be gated (paid one-time
-  readings, gifts, checkout, webhooks, auth). Adding the guard to a route
-  without declaring it, or gating a free/paid route, fails CI.
+  `userFromRequest` throws on lookup errors rather than returning null, so an
+  outage is never reported as "sign in".
+- `src/lib/pro/__tests__/pro-route-inventory.test.ts` classifies every API
+  route, including what it imports directly from `~/lib`, and every
+  `createServerFn` module. Each one is Pro-gated, Pro-aware (reads `hasPro` but
+  isn't gated: checkout and status), or never gated (paid one-time readings,
+  gifts, webhooks, auth, portal, the Gemini proxy). Any unclassified entry
+  point, or a `requirePro`/`withPro`/`hasPro` reference that doesn't match its
+  classification, fails CI.
 
 There are no Pro-only server operations yet: Celtic Cross and vector scoring
 are not built, the Journal is client-only sample entries, and the three-card
@@ -252,6 +258,13 @@ One-time orders and `/api/stripe-webhook` are unchanged.
   (`GET /v1/subscriptions?customer=…&status=all`) for another active Pro
   subscription on the same customer and syncs that one instead of revoking.
   If that lookup fails, the revoke still proceeds (the DB guard above still applies).
-- Remaining edge: two Checkout tabs opened *before* either completes can both
-  succeed. Pro stays correct (the guard keeps it active), but the customer is
-  billed twice until one is cancelled in the portal.
+- **One Stripe Customer per user, created before the first Checkout.**
+  `ensureStripeCustomer` creates the customer server-side (`POST /v1/customers`
+  with a per-user `Idempotency-Key`) and stores it on the entitlement row with
+  status `incomplete`, which does not grant Pro. Every Checkout passes
+  `customer=`. Concurrent tabs therefore share one customer, so the webhook's
+  "other active subscription for this customer" check and the Customer Portal
+  both see every subscription.
+- Remaining edge: two Checkout tabs opened *before* either completes can still
+  both be paid. Pro stays correct, and the customer can cancel the extra one in
+  the Portal, because both subscriptions sit on the same customer.
