@@ -85,7 +85,8 @@ describe("Stripe customer created before the first checkout", () => {
     await createProCheckoutSession({ userId: "u1", email: "A@b.c", origin: "o", db }, s.fetchImpl);
     expect(s.customerCalls).toHaveLength(1);
     const headers = s.customerCalls[0].headers as Record<string, string>;
-    expect(headers["idempotency-key"]).toBe("di-pro-customer:u1:a@b.c");
+    expect(headers["idempotency-key"]).toBe("di-pro-customer:u1");
+    expect(headers["idempotency-key"]).not.toContain("@");
     expect(decodeURIComponent(String(s.customerCalls[0].body))).toContain("metadata[user_id]=u1");
     expect(rows.get("u1")).toEqual({ status: "incomplete", stripe_customer_id: "cus_1" });
     expect(s.sessionBodies[0]).toContain("customer=cus_1");

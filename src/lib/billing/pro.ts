@@ -56,7 +56,7 @@ export async function ensureStripeCustomer(
     "/customers",
     { email: args.email, metadata: { user_id: args.userId } },
     fetchImpl,
-    { idempotencyKey: `di-pro-customer:${args.userId}:${args.email.toLowerCase()}` },
+    { idempotencyKey: `di-pro-customer:${args.userId}` }, // user id only: no personal data in Stripe request metadata
   );
   const { rows } = await args.db.query(
     `insert into entitlements (user_id, plan, status, stripe_customer_id, updated_at)
