@@ -56,15 +56,40 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    deploy):
    - A delivery takes a short send lease (`*_email_lease_until`, 120 s).
      `*_emailed_at` is set only after Resend accepted the email.
-   - A transient failure (network, 5xx, 429) releases the lease and the
-     webhook answers 500, so Stripe retries.
+   - A transient failure (network, timeout, 5xx, 429, 408, or Resend's 409
+     `concurrent_idempotent_requests`) releases the lease, counts an attempt
+     (`*_email_attempts`) and the webhook answers 500, so Stripe retries.
+   - Retries are bounded: after `GIFT_EMAIL_MAX_ATTEMPTS` failed sends
+     (default 5) or once the order has been paid for longer than
+     `GIFT_EMAIL_GIVE_UP_HOURS` (default 6), `*_email_failed_at` is set, the
+     failure is logged ("gift email retries exhausted"), and the webhook answers
+     200. A long Resend outage therefore never gets the Stripe endpoint
+     disabled. The buyer still sees the claim link on the confirmation view.
+     Support can list stuck emails with `select order_id from gift_claims where
+     recipient_email_failed_at is not null or buyer_email_failed_at is not null`.
+   - Each Resend call has a 12 s timeout (AbortController); a timeout counts as
+     a transient failure.
    - A crash mid-send leaves only the lease. It expires and a later retry sends.
      While a lease is held, other deliveries answer 500 rather than send twice.
    - Every send carries a Resend `Idempotency-Key` (`gift-<kind>-<orderId>`), so
      the narrow "accepted but not yet recorded" crash is de-duplicated by Resend.
-   - A permanent 4xx (e.g. an invalid address) is logged and not retried.
+   - A permanent 4xx (e.g. an invalid address), including Resend's 409
+     `invalid_idempotent_request` (key reused with a different body), is logged,
+     recorded in `*_email_failed_at`, and not retried. The request body is
+     built deterministically from the order, so a retry under the same key is
+     byte-identical and should never hit that 409.
    - If `RESEND_API_KEY` / `GIFT_FROM_EMAIL` are unset, emails are skipped with a
      2xx, because a retry can't fix configuration. The buyer still sees the link.
+   - **Accepted risk (N4):** Resend keeps an `Idempotency-Key` for 24 h. If a
+     send was accepted but the process died before `*_emailed_at` was written,
+     and the next attempt comes more than 24 h later, the email can go out
+     twice. With the 6 h give-up default that only happens if
+     `GIFT_EMAIL_GIVE_UP_HOURS` is raised past 24 or support re-sends by hand;
+     a duplicate gift email is harmless (same link).
+   - **Accepted risk (N5):** if `RESEND_API_KEY` / `GIFT_FROM_EMAIL` are unset,
+     no gift email is sent and nothing is recorded for a later re-send.
+     `go-live.sh` refuses to deploy without them, and the buyer still sees the
+     link to forward by hand.
    - Without 0005 the webhook answers 500 for paid gifts after minting (Stripe
      retries), and `GET /api/health/payments` lists the missing 0005 columns. Gifts with no recipient email are logged
    (order id only, never the token) for support.
@@ -88,6 +113,8 @@ over an email problem.
 | `STRIPE_WEBHOOK_SECRET` | Stripe Dashboard, Developers, Webhooks, your endpoint, Signing secret (`whsec_...`). |
 | `RESEND_API_KEY` | Resend dashboard. Only needed for Gift Readings. |
 | `GIFT_FROM_EMAIL` | A sender verified in Resend, e.g. `Divine Insight <readings@yourdomain>`. |
+| `GIFT_EMAIL_MAX_ATTEMPTS` | Optional. Failed gift-email sends before giving up (integer 1-100, default 5). |
+| `GIFT_EMAIL_GIVE_UP_HOURS` | Optional. Stop retrying gift emails this many hours after payment (0-72, default 6). |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
 
 `go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
