@@ -73,6 +73,35 @@ export async function createPortalSession(
   return portal.url;
 }
 
+export const ACTIVE_SUBSCRIPTION_STATUSES = new Set(["active", "trialing", "past_due"]);
+
+/**
+ * Another Pro subscription for the same customer that still grants access,
+ * other than `excludeId`. Used so a cancelled/expired subscription never
+ * revokes Pro while a second one keeps billing.
+ */
+export async function findOtherActiveProSubscription(
+  customer: string,
+  excludeId: string,
+  fetchImpl?: FetchLike,
+): Promise<StripeSubscription | null> {
+  const list = await stripeRequest<{ data?: StripeSubscription[] }>(
+    "GET",
+    "/subscriptions",
+    { customer, status: "all", limit: 20 },
+    fetchImpl,
+  );
+  const price = proPriceId();
+  return (
+    (list.data ?? []).find(
+      (s) =>
+        s.id !== excludeId &&
+        ACTIVE_SUBSCRIPTION_STATUSES.has(s.status) &&
+        s.items?.data?.[0]?.price?.id === price,
+    ) ?? null
+  );
+}
+
 export function fetchSubscription(id: string, fetchImpl?: FetchLike) {
   return stripeRequest<StripeSubscription>("GET", `/subscriptions/${encodeURIComponent(id)}`, {}, fetchImpl);
 }
@@ -82,7 +111,7 @@ export async function syncSubscription(
   sub: StripeSubscription,
   db: Queryable,
   userIdHint?: string | null,
-): Promise<"synced" | "wrong-price" | "no-user"> {
+): Promise<"synced" | "wrong-price" | "no-user" | "superseded"> {
   const item = sub.items?.data?.[0];
   if (item?.price?.id !== proPriceId()) return "wrong-price";
 
@@ -97,7 +126,11 @@ export async function syncSubscription(
   if (!userId) return "no-user";
 
   const periodEnd = sub.current_period_end ?? item?.current_period_end;
-  await db.query(
+  // Guard against double subscriptions: an event for a subscription that is
+  // NOT the one stored on the row may only overwrite it when it would grant
+  // access, or when the stored one no longer grants access. So cancelling an
+  // old subscription never revokes a newer one that is still billing.
+  const { rows: applied } = await db.query(
     `insert into entitlements
        (user_id, plan, status, current_period_end, stripe_customer_id, stripe_subscription_id, stripe_price_id, updated_at)
      values ($1, 'pro', $2, $3, $4, $5, $6, now())
@@ -107,7 +140,13 @@ export async function syncSubscription(
        stripe_customer_id = excluded.stripe_customer_id,
        stripe_subscription_id = excluded.stripe_subscription_id,
        stripe_price_id = excluded.stripe_price_id,
-       updated_at = now()`,
+       updated_at = now()
+     where entitlements.stripe_subscription_id is null
+        or entitlements.stripe_subscription_id = excluded.stripe_subscription_id
+        or excluded.status in ('active', 'trialing', 'past_due')
+        or not (entitlements.status in ('active', 'trialing', 'past_due')
+                and (entitlements.current_period_end is null or entitlements.current_period_end > now()))
+     returning user_id`,
     [
       userId,
       sub.status,
@@ -117,5 +156,6 @@ export async function syncSubscription(
       item?.price?.id ?? null,
     ],
   );
+  if (applied.length === 0) return "superseded";
   return "synced";
 }

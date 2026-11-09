@@ -56,7 +56,7 @@ describe("syncSubscription", () => {
     metadata: { user_id: "u1" }, items: { data: [{ price: { id: "price_pro" } }] }, ...over,
   });
   test("upserts entitlement", async () => {
-    const db = { query: vi.fn(async () => ({ rows: [] })) };
+    const db = { query: vi.fn(async () => ({ rows: [{ user_id: "u1" }] })) };
     expect(await syncSubscription(sub(), db)).toBe("synced");
     const [q, v] = db.query.mock.calls[0] as unknown as [string, unknown[]];
     expect(q).toMatch(/on conflict \(user_id, plan\)/);
@@ -68,12 +68,44 @@ describe("syncSubscription", () => {
     expect(db.query).not.toHaveBeenCalled();
   });
   test("falls back to customer lookup", async () => {
-    const db = { query: vi.fn(async (q: string) => ({ rows: q.startsWith("select") ? [{ user_id: "u9" }] : [] })) };
+    const db = { query: vi.fn(async (_q: string) => ({ rows: [{ user_id: "u9" }] })) };
     expect(await syncSubscription(sub({ metadata: {} }), db)).toBe("synced");
     expect((db.query.mock.calls[1] as unknown as [string, unknown[]])[1][0]).toBe("u9");
   });
   test("no-user when unknown", async () => {
     const db = { query: vi.fn(async () => ({ rows: [] })) };
     expect(await syncSubscription(sub({ metadata: {} }), db)).toBe("no-user");
+  });
+});
+
+describe("syncSubscription double-subscription guard", () => {
+  const sub = (over = {}) => ({
+    id: "sub_old", status: "canceled", customer: "cus_1", current_period_end: 1900000000,
+    metadata: { user_id: "u1" }, items: { data: [{ price: { id: "price_pro" } }] }, ...over,
+  });
+  test("upsert only overwrites a different stored subscription when it would grant access or the stored one has lapsed", async () => {
+    const db = { query: vi.fn(async (_q: string, _v: unknown[]) => ({ rows: [{ user_id: "u1" }] })) };
+    await syncSubscription(sub(), db);
+    const q = db.query.mock.calls[0][0];
+    expect(q).toMatch(/where entitlements\.stripe_subscription_id is null/);
+    expect(q).toMatch(/or entitlements\.stripe_subscription_id = excluded\.stripe_subscription_id/);
+    expect(q).toMatch(/or excluded\.status in \('active', 'trialing', 'past_due'\)/);
+    expect(q).toMatch(/returning user_id/);
+  });
+  test("returns superseded when the guard skips the write", async () => {
+    const db = { query: vi.fn(async () => ({ rows: [] })) };
+    expect(await syncSubscription(sub(), db)).toBe("superseded");
+  });
+});
+
+describe("findOtherActiveProSubscription", () => {
+  test("finds another active Pro subscription for the customer, excluding the given one", async () => {
+    const { findOtherActiveProSubscription } = await import("../pro");
+    const s = (id: string, status: string, price = "price_pro") => ({ id, status, customer: "cus_1", items: { data: [{ price: { id: price } }] } });
+    const fetchImpl = vi.fn(async (_u: string) => okJson({ data: [s("sub_a", "canceled"), s("sub_x", "active", "price_other"), s("sub_b", "past_due")] }));
+    const other = await findOtherActiveProSubscription("cus_1", "sub_a", fetchImpl);
+    expect(other?.id).toBe("sub_b");
+    expect(decodeURIComponent(fetchImpl.mock.calls[0][0])).toContain("/v1/subscriptions?customer=cus_1&status=all");
+    expect(await findOtherActiveProSubscription("cus_1", "sub_b", fetchImpl)).toBeNull();
   });
 });

@@ -238,3 +238,20 @@ Entitlements are written only by `POST /api/stripe-subscription-webhook`
 `invoice.paid` and `invoice.payment_failed`, dedupes by event id, and re-fetches the
 subscription from Stripe. Apply `migrations/0002_pro_subscriptions.sql` first.
 One-time orders and `/api/stripe-webhook` are unchanged.
+
+### Double-subscription protection
+
+- `POST /api/pro/checkout` returns **409** `{ error: "already_subscribed", manage: "/api/pro/portal" }`
+  when the user already has Pro (`hasPro`: active / trialing / past_due within
+  the period), so no second Checkout Session is created.
+- `syncSubscription` only lets an event for a subscription that is *not* the one
+  stored on the entitlement row overwrite it if that event grants access, or
+  the stored one has already lapsed. Otherwise it returns `"superseded"` and
+  leaves the row alone.
+- When a subscription stops granting access, the webhook first asks Stripe
+  (`GET /v1/subscriptions?customer=…&status=all`) for another active Pro
+  subscription on the same customer and syncs that one instead of revoking.
+  If that lookup fails, the revoke still proceeds (the DB guard above still applies).
+- Remaining edge: two Checkout tabs opened *before* either completes can both
+  succeed. Pro stays correct (the guard keeps it active), but the customer is
+  billed twice until one is cancelled in the portal.
