@@ -219,6 +219,7 @@ async function deliverUntil2xx(make: () => Request, max = 5): Promise<Response[]
 beforeEach(() => {
   vi.unstubAllEnvs();
   vi.stubEnv("STRIPE_WEBHOOK_SECRET", "whsec_test");
+  vi.stubEnv("GIFT_TOKEN_SECRET", "test-gift-token-secret-0123456789abcdef");
   order = {
     id: ORDER,
     sku: "giftReading",
@@ -263,8 +264,9 @@ describe("gift webhook: crash after payment is recorded, then Stripe retries", (
       expect(claims[0].buyer_emailed_at).toBeInstanceOf(Date);
       expect(mail.sendGiftEmail).toHaveBeenCalledTimes(1);
       expect(mail.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
-      const url = `https://divine.example/claim/${claims[0].token}`;
-      expect(mail.sendGiftEmail.mock.calls[0][0].claimUrl).toBe(url);
+      // Both emails carry the same, single claim link.
+      const url = mail.sendGiftEmail.mock.calls[0][0].claimUrl as string;
+      expect(url).toMatch(/^https:\/\/divine\.example\/claim\/[A-Za-z0-9_-]+$/);
       expect(mail.sendGiftBuyerEmail.mock.calls[0][0].claimUrl).toBe(url);
     },
   );

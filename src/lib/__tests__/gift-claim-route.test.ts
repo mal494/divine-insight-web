@@ -17,7 +17,7 @@ describe("/api/claim/$token for a valid paid token", () => {
   beforeEach(() => vi.resetAllMocks());
 
   test("a gift bought without a recipient email opens normally (no error)", async () => {
-    mocks.getClaim.mockResolvedValue({ senderName: null, note: null, claimed: false, reading: null });
+    mocks.getClaim.mockResolvedValue({ senderName: null, note: null, claimed: false, reading: null, expired: false });
     const res = await handlers.GET({ params: { token: TOKEN } });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ senderName: null, note: null, claimed: false, reading: null });
@@ -33,5 +33,33 @@ describe("/api/claim/$token for a valid paid token", () => {
       }),
     });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("/api/claim/$token expiry", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    delete process.env.GIFT_SUPPORT_EMAIL;
+  });
+
+  test("an expired link answers 410 expired (never 404/500)", async () => {
+    mocks.getClaim.mockResolvedValue({ senderName: null, note: null, claimed: false, reading: null, expired: true });
+    process.env.GIFT_SUPPORT_EMAIL = "help@example.com";
+    const res = await handlers.GET({ params: { token: TOKEN } });
+    expect(res.status).toBe(410);
+    expect(await res.json()).toEqual({ error: "expired", supportEmail: "help@example.com" });
+  });
+
+  test("claiming an expired link answers 410", async () => {
+    mocks.claimGift.mockResolvedValue({ ok: false, reason: "expired" });
+    const res = await handlers.POST({
+      params: { token: TOKEN },
+      request: new Request("https://divine.example/api/claim/x", {
+        method: "POST",
+        body: JSON.stringify({ reading: {} }),
+      }),
+    });
+    expect(res.status).toBe(410);
+    expect(await res.json()).toEqual({ error: "expired" });
   });
 });
