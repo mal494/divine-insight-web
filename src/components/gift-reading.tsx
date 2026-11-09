@@ -20,6 +20,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CardFace } from "~/components/card-face";
 import { DECK, type TarotCard } from "~/data/deck";
 import { useEntitlement } from "~/lib/entitlement";
+import { PurchasesPaused } from "~/components/purchases-paused";
+import { paidCheckoutEnabled } from "~/lib/paid-checkout";
 import { GIFT_READING_PRICE, formatPrice } from "~/lib/payments";
 import { shuffle } from "~/lib/random";
 import { singleCardLine } from "~/lib/synthesis";
@@ -115,6 +117,9 @@ export function GiftReading() {
 
         {!unlocked && (
           <>
+          {!paidCheckoutEnabled() ? (
+            <PurchasesPaused />
+          ) : (
           <div className="mx-auto mt-6 flex max-w-sm flex-col gap-3 text-left">
             <label className="block">
               <span className="sr-only">Who is it for? (email)</span>
@@ -193,6 +198,7 @@ export function GiftReading() {
               </p>
             )}
           </div>
+          )}
 
           <div className="card-scene mt-8 aspect-[3/5] w-full max-w-[8.5rem] sm:max-w-[11rem]">
             <div className={`card-inner ${revealed ? "is-revealed" : ""}`}>

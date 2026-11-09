@@ -22,6 +22,8 @@ import { CardFace } from "~/components/card-face";
 import { ReadingPanel } from "~/components/reading-panel";
 import { DECK, type TarotCard } from "~/data/deck";
 import { useEntitlement } from "~/lib/entitlement";
+import { PurchasesPaused } from "~/components/purchases-paused";
+import { paidCheckoutEnabled } from "~/lib/paid-checkout";
 import {
   EXTENDED_READING_PRICE,
   READING_BUNDLE_PRICE,
@@ -181,7 +183,8 @@ export function ExtendedReading() {
       </div>
 
       {/* Unlock card — hidden once the purchase is verified */}
-      {!unlocked && (
+      {!unlocked && !paidCheckoutEnabled() && <PurchasesPaused className="mt-10" />}
+      {!unlocked && paidCheckoutEnabled() && (
         <div
           className="animate-fade-up mx-auto mt-10 max-w-xl rounded-2xl border border-gold-500/25 bg-night-900/70 p-6 text-center shadow-[0_25px_70px_rgba(0,0,0,0.35)] backdrop-blur-sm sm:p-8"
           style={{ animationDelay: "0.1s" }}

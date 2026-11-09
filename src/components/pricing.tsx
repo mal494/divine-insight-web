@@ -15,6 +15,8 @@
  * clock-dependent output — so server and client always match.
  */
 import { useEntitlement } from "~/lib/entitlement";
+import { PurchasesPaused } from "~/components/purchases-paused";
+import { paidCheckoutEnabled } from "~/lib/paid-checkout";
 import {
   EXTENDED_READING_PRICE,
   GIFT_READING_PRICE,
@@ -209,6 +211,9 @@ export function Pricing() {
             </ul>
 
             <div className="mt-auto pt-6">
+              {!paidCheckoutEnabled() ? (
+                <PurchasesPaused className="mt-0" />
+              ) : (
               <button
                 type="button"
                 onClick={() => buy(tier)}
@@ -218,6 +223,7 @@ export function Pricing() {
                 <span aria-hidden>✦</span>
                 <span>{checkout.busy ? "Opening Stripe…" : tier.cta}</span>
               </button>
+              )}
             </div>
           </article>
         ))}
