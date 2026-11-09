@@ -13,9 +13,17 @@
  *
  * Results (never thrown):
  *   "sent"           — Resend accepted it.
- *   "failed"         — transient (network, 5xx, 408/409/429): the webhook
- *                      answers non-2xx so Stripe retries.
- *   "rejected"       — permanent 4xx (e.g. invalid address): logged, not retried.
+ *   "failed"         — transient (network error, timeout, 5xx, 408, 429, or a
+ *                      409 `concurrent_idempotent_requests`): the webhook
+ *                      answers non-2xx so Stripe retries (bounded: see
+ *                      GIFT_EMAIL_MAX_ATTEMPTS / GIFT_EMAIL_GIVE_UP_HOURS in
+ *                      ~/lib/gifts).
+ *   "rejected"       — permanent 4xx (e.g. invalid address), including a 409
+ *                      `invalid_idempotent_request` (key reused with a
+ *                      different body; retrying can never succeed): logged,
+ *                      not retried.
+ * Every Resend call is bounded by RESEND_TIMEOUT_MS (AbortController), so a
+ * hung connection becomes "failed" instead of eating the function's budget.
  *   "not-configured" — see above.
  * Each send carries an Idempotency-Key (order + kind), so if a process dies
  * after Resend accepted the email but before we recorded it, the retry's
@@ -34,10 +42,74 @@ export function giftEmailConfigured(): boolean {
   return Boolean(process.env.RESEND_API_KEY && process.env.GIFT_FROM_EMAIL);
 }
 
-function classify(status: number): GiftSendResult {
+/** Hard cap on one Resend request (connect + response). */
+export const RESEND_TIMEOUT_MS = 12_000;
+
+/**
+ * Map a Resend response to a result. A 409 is only transient when another
+ * request with the same Idempotency-Key is still in flight
+ * (`concurrent_idempotent_requests`); `invalid_idempotent_request` (same key,
+ * different payload) or any unrecognised 409 can never succeed on retry.
+ */
+export function classifyResend(status: number, errorName?: string | null): GiftSendResult {
   if (status >= 200 && status < 300) return "sent";
-  if (status === 408 || status === 409 || status === 429 || status >= 500) return "failed";
+  if (status === 409) {
+    return errorName === "concurrent_idempotent_requests" ? "failed" : "rejected";
+  }
+  if (status === 408 || status === 429 || status >= 500) return "failed";
   return "rejected";
+}
+
+type ResendPayload = {
+  from: string;
+  to: string[];
+  subject: string;
+  text: string;
+  html: string;
+};
+
+/**
+ * POST one email to Resend with a timeout. Never throws. The payload is a pure
+ * function of its inputs (no timestamps or random ids), so a retry with the
+ * same Idempotency-Key sends a byte-identical body.
+ */
+async function postToResend(
+  apiKey: string,
+  payload: ResendPayload,
+  idempotencyKey: string | undefined,
+  label: string,
+): Promise<GiftSendResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RESEND_TIMEOUT_MS);
+  try {
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        ...(idempotencyKey ? { "idempotency-key": idempotencyKey } : {}),
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (res.status >= 200 && res.status < 300) return "sent";
+    const detail = await res.text().catch(() => "");
+    let errorName: string | null = null;
+    try {
+      errorName = (JSON.parse(detail) as { name?: unknown })?.name as string | null;
+    } catch {
+      errorName = null;
+    }
+    const result = classifyResend(res.status, typeof errorName === "string" ? errorName : null);
+    console.error(`${label} ${result}:`, res.status, errorName ?? "", detail.slice(0, 300));
+    return result;
+  } catch (err) {
+    const timedOut = controller.signal.aborted;
+    console.error(`${label} failed to send${timedOut ? ` (timed out after ${RESEND_TIMEOUT_MS} ms)` : ""}`, timedOut ? "" : err);
+    return "failed";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export type GiftEmailInput = {
@@ -62,29 +134,18 @@ export async function sendGiftEmail(input: GiftEmailInput): Promise<GiftSendResu
   const sender = input.senderName?.trim() || "Someone";
   const subject = `${sender} sent you a tarot reading`;
 
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
-      },
-      body: JSON.stringify({
-        from,
-        to: [input.to],
-        subject,
-        text: plainText(sender, input.note, input.claimUrl),
-        html: html(sender, input.note, input.claimUrl),
-      }),
-    });
-    const result = classify(res.status);
-    if (result !== "sent") console.error(`gift email ${result}:`, res.status, await res.text());
-    return result;
-  } catch (err) {
-    console.error("gift email failed to send", err);
-    return "failed";
-  }
+  return postToResend(
+    apiKey,
+    {
+      from,
+      to: [input.to],
+      subject,
+      text: plainText(sender, input.note, input.claimUrl),
+      html: html(sender, input.note, input.claimUrl),
+    },
+    input.idempotencyKey,
+    "gift email",
+  );
 }
 
 export type GiftBuyerEmailInput = {
@@ -112,29 +173,18 @@ export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<Gi
     return "not-configured";
   }
 
-  try {
-    const res = await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-        ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
-      },
-      body: JSON.stringify({
-        from,
-        to: [input.to],
-        subject: "Your gift reading is ready to share",
-        text: buyerText(input.recipientEmail, input.claimUrl),
-        html: buyerHtml(input.recipientEmail, input.claimUrl),
-      }),
-    });
-    const result = classify(res.status);
-    if (result !== "sent") console.error(`gift receipt ${result}:`, res.status, await res.text());
-    return result;
-  } catch (err) {
-    console.error("gift receipt failed to send", err);
-    return "failed";
-  }
+  return postToResend(
+    apiKey,
+    {
+      from,
+      to: [input.to],
+      subject: "Your gift reading is ready to share",
+      text: buyerText(input.recipientEmail, input.claimUrl),
+      html: buyerHtml(input.recipientEmail, input.claimUrl),
+    },
+    input.idempotencyKey,
+    "gift receipt",
+  );
 }
 
 
