@@ -25,6 +25,7 @@ export async function stripeRequest<T>(
   path: string,
   params: Record<string, unknown> = {},
   fetchImpl: FetchLike = fetch,
+  opts: { idempotencyKey?: string } = {},
 ): Promise<T> {
   const key = process.env.STRIPE_SECRET_KEY;
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
@@ -35,6 +36,7 @@ export async function stripeRequest<T>(
     headers: {
       authorization: `Bearer ${key}`,
       "content-type": "application/x-www-form-urlencoded",
+      ...(opts.idempotencyKey ? { "idempotency-key": opts.idempotencyKey } : {}),
     },
     body: method === "POST" ? body : undefined,
   });

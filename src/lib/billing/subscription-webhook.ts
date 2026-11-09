@@ -10,7 +10,14 @@
  * throws, the claim is released and we return 500 so Stripe retries.
  */
 import { verifyStripeSignature } from "~/lib/stripe-signature";
-import { fetchSubscription, syncSubscription, type Queryable, type StripeSubscription } from "./pro";
+import {
+  ACTIVE_SUBSCRIPTION_STATUSES,
+  fetchSubscription,
+  findOtherActiveProSubscription,
+  syncSubscription,
+  type Queryable,
+  type StripeSubscription,
+} from "./pro";
 import type { FetchLike } from "./stripe-api";
 
 type Obj = Record<string, any>;
@@ -82,6 +89,22 @@ export async function handleSubscriptionWebhook(
       // payload for deletions so a revoke is never lost.
       if (event.type !== "customer.subscription.deleted") throw err;
       sub = { ...(obj as StripeSubscription), status: "canceled" };
+    }
+    // A subscription that no longer grants access must not revoke Pro while
+    // the same customer still has another active Pro subscription.
+    if (!ACTIVE_SUBSCRIPTION_STATUSES.has(sub.status) && typeof sub.customer === "string" && sub.customer) {
+      let other: StripeSubscription | null = null;
+      try {
+        other = await findOtherActiveProSubscription(sub.customer, sub.id, deps.fetchImpl);
+      } catch (err) {
+        // Never lose a revoke because the lookup failed; the DB guard in
+        // syncSubscription still protects a different stored subscription.
+        console.error("could not list customer subscriptions", err);
+      }
+      if (other) {
+        console.warn("subscription", sub.id, "ended but", other.id, "is still active; keeping Pro");
+        sub = other;
+      }
     }
     const result = await syncSubscription(sub, db, userIdHint);
     if (result !== "synced") console.warn("subscription not synced:", result, subscriptionId);

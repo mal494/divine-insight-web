@@ -1,10 +1,17 @@
 /**
  * SubscriptionContext — client-side premium status for Divine Insight Pro.
  *
- * Backend verification is mocked for now. Production always treats premium as
- * off; only Vite dev builds can toggle `isPremium` for local QA.
- * When a real subscription check lands, replace `verifyPremiumStatus` with a
- * server call and keep this context as the single source of truth for UI.
+ * Real entitlements: when the Pro UI flag is on (VITE_PRO_UI_ENABLED=true at
+ * build time, default off — see src/lib/pro/flags.ts) the provider asks
+ * GET /api/pro/status, which answers from hasPro() on the server. With the
+ * flag off (production today) it never calls the endpoint and Pro stays
+ * hidden.
+ *
+ * DEV builds keep the PremiumDevToggle override (localStorage key
+ * `di.subscription.isPremium`) for QA without Stripe or a session.
+ *
+ * This context only decides what the UI shows. Access to Pro server
+ * operations is enforced by requirePro() in the API routes.
  */
 import {
   createContext,
@@ -15,18 +22,27 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { isProUiEnabled } from "~/lib/pro/flags";
+import {
+  DEV_OVERRIDE_STORAGE_KEY,
+  readStorageOverride,
+  resolvePremiumStatus,
+} from "~/lib/pro/resolve-status";
 
-const STORAGE_KEY = "di.subscription.isPremium";
 const DEV_PREMIUM_OVERRIDE_ENABLED = import.meta.env.DEV;
 
 type SubscriptionContextValue = {
-  /** Whether the visitor has an active Divine Insight Pro subscription. */
+  /** Whether the visitor should see Divine Insight Pro UI. */
   isPremium: boolean;
-  /** True while the (mocked) verification is in flight. */
+  /** True while the status check is in flight. */
   loading: boolean;
-  /** Override premium for testing / after a successful checkout return. */
+  /** Whether the Pro UI flag is on for this build. */
+  proUiEnabled: boolean;
+  /** Re-check status (e.g. after sign-in or returning from checkout). */
+  refresh: () => Promise<void>;
+  /** DEV only: force premium on/off for QA. No-op in production builds. */
   setIsPremium: (value: boolean) => void;
-  /** Flip premium on/off — handy for QA without a Stripe round-trip. */
+  /** DEV only: flip the premium override. No-op in production builds. */
   togglePremium: () => void;
 };
 
@@ -34,28 +50,43 @@ const SubscriptionContext = createContext<SubscriptionContextValue | null>(
   null,
 );
 
-/**
- * Mock backend verification. Swap this for a real entitlement fetch later
- * (e.g. GET /api/subscription → { active: boolean }).
- */
-async function verifyPremiumStatus(): Promise<boolean> {
-  await new Promise((resolve) => setTimeout(resolve, 120));
-  if (!DEV_PREMIUM_OVERRIDE_ENABLED) return false;
-  if (typeof window === "undefined") return false;
+function browserStorage(): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
   try {
-    return window.localStorage.getItem(STORAGE_KEY) === "true";
+    return window.localStorage;
   } catch {
-    return false;
+    return undefined;
+  }
+}
+
+function writeDevOverride(value: boolean) {
+  try {
+    browserStorage()?.setItem(DEV_OVERRIDE_STORAGE_KEY, value ? "true" : "false");
+  } catch {
+    /* private mode — in-memory state still works for the session */
   }
 }
 
 export function SubscriptionProvider({ children }: { children: ReactNode }) {
   const [isPremium, setIsPremiumState] = useState(false);
   const [loading, setLoading] = useState(true);
+  const proUiEnabled = isProUiEnabled();
+
+  const resolve = useCallback(
+    () =>
+      resolvePremiumStatus({
+        proUiEnabled,
+        devOverrideEnabled: DEV_PREMIUM_OVERRIDE_ENABLED,
+        readDevOverride: () => readStorageOverride(browserStorage()),
+        fetchImpl:
+          typeof window === "undefined" ? undefined : window.fetch.bind(window),
+      }),
+    [proUiEnabled],
+  );
 
   useEffect(() => {
     let cancelled = false;
-    verifyPremiumStatus().then((active) => {
+    resolve().then((active) => {
       if (!cancelled) {
         setIsPremiumState(active);
         setLoading(false);
@@ -64,37 +95,40 @@ export function SubscriptionProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [resolve]);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    const active = await resolve();
+    setIsPremiumState(active);
+    setLoading(false);
+  }, [resolve]);
 
   const setIsPremium = useCallback((value: boolean) => {
-    if (!DEV_PREMIUM_OVERRIDE_ENABLED) {
-      setIsPremiumState(false);
-      return;
-    }
+    if (!DEV_PREMIUM_OVERRIDE_ENABLED) return;
     setIsPremiumState(value);
-    try {
-      window.localStorage.setItem(STORAGE_KEY, value ? "true" : "false");
-    } catch {
-      /* private mode — in-memory state still works for the session */
-    }
+    writeDevOverride(value);
   }, []);
 
   const togglePremium = useCallback(() => {
     if (!DEV_PREMIUM_OVERRIDE_ENABLED) return;
     setIsPremiumState((prev) => {
       const next = !prev;
-      try {
-        window.localStorage.setItem(STORAGE_KEY, next ? "true" : "false");
-      } catch {
-        /* ignore */
-      }
+      writeDevOverride(next);
       return next;
     });
   }, []);
 
   const value = useMemo(
-    () => ({ isPremium, loading, setIsPremium, togglePremium }),
-    [isPremium, loading, setIsPremium, togglePremium],
+    () => ({
+      isPremium,
+      loading,
+      proUiEnabled,
+      refresh,
+      setIsPremium,
+      togglePremium,
+    }),
+    [isPremium, loading, proUiEnabled, refresh, setIsPremium, togglePremium],
   );
 
   return (
