@@ -4,6 +4,8 @@
  * unless VITE_PAID_CHECKOUT_ENABLED === "true". Tips are unaffected, and a
  * customer who already holds credits can still draw.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -27,7 +29,6 @@ import { GiftReading } from "../gift-reading";
 import { Pricing } from "../pricing";
 import { SingleInsight } from "../single-insight";
 import { TipJar } from "../tip-jar";
-import { TIP_LINKS } from "~/lib/payments";
 import { paidCheckoutEnabled, PURCHASES_PAUSED_COPY } from "~/lib/paid-checkout";
 
 const PAID = [
@@ -92,9 +93,17 @@ describe("pause does not take away what people already have", () => {
     expect(html).toMatch(draw);
   });
 
-  test("TipJar is unaffected: all three tip links render while paused", () => {
-    const html = renderToStaticMarkup(<TipJar />);
-    for (const href of Object.values(TIP_LINKS)) expect(html).toContain(href);
-    expect(pausedCount(html)).toBe(0);
+  test("TipJar is unaffected: same output paused or not, no paused note", () => {
+    const paused = renderToStaticMarkup(<TipJar />);
+    vi.stubEnv("VITE_PAID_CHECKOUT_ENABLED", "true");
+    const enabled = renderToStaticMarkup(<TipJar />);
+    expect(paused).toBe(enabled);
+    expect(pausedCount(paused)).toBe(0);
+    expect(paused).not.toContain(PURCHASES_PAUSED_COPY);
+  });
+
+  test("TipJar does not consult the pause flag at all", () => {
+    const src = readFileSync(join(process.cwd(), "src/components/tip-jar.tsx"), "utf8");
+    expect(src).not.toMatch(/paid-checkout|PurchasesPaused/);
   });
 });

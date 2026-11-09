@@ -39,9 +39,13 @@ describe("/api/checkout pause", () => {
   });
 
   test("PAID_CHECKOUT_ENABLED=true restores checkout", async () => {
-    const res = await handleCheckout(req({ sku: "extendedReading" }), { PAID_CHECKOUT_ENABLED: "true" });
+    const res = await handleCheckout(req({ sku: "extendedReading" }), {
+      PAID_CHECKOUT_ENABLED: "true",
+      VERCEL_ENV: "production",
+    });
+    const body = (await res.json()) as { orderId?: string; url?: string; error?: string };
+    expect(body.error).not.toBe("checkout_paused");
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { orderId: string; url: string };
     expect(body.url).toMatch(/^https:\/\/buy\.stripe\.com\/.+client_reference_id=11111111-/);
     expect(createOrder).toHaveBeenCalledTimes(1);
   });
