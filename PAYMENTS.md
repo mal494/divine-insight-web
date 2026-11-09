@@ -51,11 +51,22 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    The buyer is also always shown the link on the gift confirmation view:
    `/api/order/<id>` returns `claimUrl` for a paid gift once the webhook has
    minted it. That route is read-only and never mints; the webhook is the only
-   minter. Each email is additionally reserved with `gift_claims.recipient_emailed_at`
-   / `buyer_emailed_at` (migration `0005_gift_claim_email_flags.sql`, apply
-   before deploy) so it goes out exactly once whoever minted the token; a
-   failed send clears the flag. Without 0005 the webhook answers 500 for paid
-   gifts after minting (Stripe retries). Gifts with no recipient email are logged
+   minter. Gift emails are delivered **at least once until recorded, then
+   never again** (migration `0005_gift_claim_email_flags.sql`, apply before
+   deploy):
+   - A delivery takes a short send lease (`*_email_lease_until`, 120 s).
+     `*_emailed_at` is set only after Resend accepted the email.
+   - A transient failure (network, 5xx, 429) releases the lease and the
+     webhook answers 500, so Stripe retries.
+   - A crash mid-send leaves only the lease. It expires and a later retry sends.
+     While a lease is held, other deliveries answer 500 rather than send twice.
+   - Every send carries a Resend `Idempotency-Key` (`gift-<kind>-<orderId>`), so
+     the narrow "accepted but not yet recorded" crash is de-duplicated by Resend.
+   - A permanent 4xx (e.g. an invalid address) is logged and not retried.
+   - If `RESEND_API_KEY` / `GIFT_FROM_EMAIL` are unset, emails are skipped with a
+     2xx, because a retry can't fix configuration. The buyer still sees the link.
+   - Without 0005 the webhook answers 500 for paid gifts after minting (Stripe
+     retries), and `GET /api/health/payments` lists the missing 0005 columns. Gifts with no recipient email are logged
    (order id only, never the token) for support.
 3. The recipient opens the link, turns one card, and that POST burns the token,
    spends the credit, and stores the reading.
@@ -133,7 +144,9 @@ has no order or recipient; it is recorded in `orphan_payments` for support.
   - `checkout.session.completed`
   - `checkout.session.async_payment_succeeded` (fulfilled exactly like `completed` once paid)
   - `checkout.session.async_payment_failed` (moves the pending order to `failed`;
-    never grants credits or creates a gift link; idempotent; always 2xx)
+    never grants credits or creates a gift link; idempotent; the order update
+    and the event record are one atomic statement, so a crash can't leave the
+    event "seen" with the order still pending; 2xx unless the DB errors)
 
 **Payment links (per environment)**
 
@@ -234,7 +247,9 @@ before merging. It is idempotent and safe to run while older code is live.
 Without it the code fails closed: checkout, order, reading and claim answer
 503 (`schema_not_migrated` where detectable), the webhook answers 5xx so Stripe
 retries, and `GET /api/health/payments` returns 503 listing what is missing
-(200 `{ ok: true }` when ready; read-only, no DDL).
+(200 `{ ok: true }` when ready; read-only, no DDL). It is public, so it is
+rate-limited by caching: a 200 is cached per instance for 60 s, a 503 for 5 s,
+concurrent requests share one query, and errors are not cached.
 
 ## Divine Insight Pro
 

@@ -18,6 +18,8 @@ type Row = {
   claimed: boolean;
   recipient_emailed_at?: Date | null;
   buyer_emailed_at?: Date | null;
+  recipient_email_lease_until?: number | null;
+  buyer_email_lease_until?: number | null;
 };
 let order: {
   id: string;
@@ -65,18 +67,38 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     readings.push({ order_id: c.order_id, payload: JSON.parse(payload) });
     return [{ order_id: c.order_id, reading_id: readingId }];
   }
-  const flag = /^update gift_claims set (recipient|buyer)_emailed_at = (now\(\)|null)/.exec(q);
-  if (flag) {
-    const key = `${flag[1]}_emailed_at` as "recipient_emailed_at" | "buyer_emailed_at";
+  const lease = /^update gift_claims set (recipient|buyer)_email_lease_until = now\(\) \+ make_interval/.exec(q);
+  if (lease) {
+    const kind = lease[1] as "recipient" | "buyer";
+        const [secs, orderId] = values as [number, string];
+    const c = claims.find((x) => x.order_id === orderId);
+    if (!c || c[`${kind}_emailed_at`]) return [];
+    const until = c[`${kind}_email_lease_until`];
+    if (until && until > Date.now()) return [];
+    c[`${kind}_email_lease_until`] = Date.now() + Number(secs) * 1000;
+    return [{ order_id: orderId }];
+  }
+  const sentQ = /^select (recipient|buyer)_emailed_at is not null as sent from gift_claims/.exec(q);
+  if (sentQ) {
     const c = claims.find((x) => x.order_id === values[0]);
-    if (!c) return [];
-    if (flag[2] === "null") {
-      c[key] = null;
-      return [];
+    return c ? [{ sent: Boolean(c[`${sentQ[1] as "recipient" | "buyer"}_emailed_at`]) }] : [];
+  }
+  const mark = /^update gift_claims set (recipient|buyer)_emailed_at = now\(\), \w+ = null/.exec(q);
+  if (mark) {
+    const kind = mark[1] as "recipient" | "buyer";
+    const c = claims.find((x) => x.order_id === values[0]);
+    if (c) {
+      c[`${kind}_emailed_at`] = new Date();
+      c[`${kind}_email_lease_until`] = null;
     }
-    if (c[key]) return [];
-    c[key] = new Date();
-    return [{ order_id: c.order_id }];
+    return [];
+  }
+  const release = /^update gift_claims set (recipient|buyer)_email_lease_until = null/.exec(q);
+  if (release) {
+    const kind = release[1] as "recipient" | "buyer";
+    const c = claims.find((x) => x.order_id === values[0]);
+    if (c && !c[`${kind}_emailed_at`]) c[`${kind}_email_lease_until`] = null;
+    return [];
   }
   if (q.startsWith("select c.token as stored_token")) {
     const c = claims.find((x) => x.token === values[0] || x.token === values[1]);
@@ -168,8 +190,10 @@ beforeEach(() => {
   claims = [];
   readings = [];
   inserts = 0;
-  mocks.sendGiftEmail.mockResolvedValue(true);
-  mocks.sendGiftBuyerEmail.mockResolvedValue(true);
+  mocks.sendGiftEmail.mockResolvedValue("sent");
+  mocks.sendGiftBuyerEmail.mockResolvedValue("sent");
+  vi.stubEnv("RESEND_API_KEY", "re_test");
+  vi.stubEnv("GIFT_FROM_EMAIL", "gifts@example.com");
 });
 
 describe("poll-before-webhook race", () => {

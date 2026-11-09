@@ -6,10 +6,20 @@
  * to the bundle. Swapping providers later means changing this one function.
  *
  * Configuration:
- *   RESEND_API_KEY  — required. Without it nothing is sent and the failure is
- *                     logged, never thrown: a gift that was paid for must not
- *                     fail the webhook, or Stripe will retry the payment event
- *                     for days over an email problem.
+ *   RESEND_API_KEY  — required. Without it nothing is sent ("not-configured");
+ *                     the webhook then skips gift emails and answers 2xx (a
+ *                     retry cannot fix configuration; the buyer still sees
+ *                     the claim link).
+ *
+ * Results (never thrown):
+ *   "sent"           — Resend accepted it.
+ *   "failed"         — transient (network, 5xx, 408/409/429): the webhook
+ *                      answers non-2xx so Stripe retries.
+ *   "rejected"       — permanent 4xx (e.g. invalid address): logged, not retried.
+ *   "not-configured" — see above.
+ * Each send carries an Idempotency-Key (order + kind), so if a process dies
+ * after Resend accepted the email but before we recorded it, the retry's
+ * resend is de-duplicated by Resend (24 h window).
  *   GIFT_FROM_EMAIL — the verified sender, e.g. "Divine Insight <readings@yourdomain>".
  *   PUBLIC_SITE_URL — origin used to build the claim link.
  *
@@ -17,21 +27,36 @@
  */
 import { SHARE_CLAIM_LINK_COPY } from "~/lib/gift-validation";
 
+export type GiftSendResult = "sent" | "failed" | "rejected" | "not-configured";
+
+/** True when gift emails can be sent at all (both settings present). */
+export function giftEmailConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY && process.env.GIFT_FROM_EMAIL);
+}
+
+function classify(status: number): GiftSendResult {
+  if (status >= 200 && status < 300) return "sent";
+  if (status === 408 || status === 409 || status === 429 || status >= 500) return "failed";
+  return "rejected";
+}
+
 export type GiftEmailInput = {
+  /** Resend Idempotency-Key, e.g. "gift-recipient-<orderId>". */
+  idempotencyKey?: string;
   to: string;
   senderName: string | null;
   note: string | null;
   claimUrl: string;
 };
 
-export async function sendGiftEmail(input: GiftEmailInput): Promise<boolean> {
+export async function sendGiftEmail(input: GiftEmailInput): Promise<GiftSendResult> {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.GIFT_FROM_EMAIL;
   if (!apiKey || !from) {
     console.error(
       "gift email not sent — RESEND_API_KEY and GIFT_FROM_EMAIL must both be set",
     );
-    return false;
+    return "not-configured";
   }
 
   const sender = input.senderName?.trim() || "Someone";
@@ -43,6 +68,7 @@ export async function sendGiftEmail(input: GiftEmailInput): Promise<boolean> {
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
+        ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
       },
       body: JSON.stringify({
         from,
@@ -52,18 +78,18 @@ export async function sendGiftEmail(input: GiftEmailInput): Promise<boolean> {
         html: html(sender, input.note, input.claimUrl),
       }),
     });
-    if (!res.ok) {
-      console.error("gift email rejected:", res.status, await res.text());
-      return false;
-    }
-    return true;
+    const result = classify(res.status);
+    if (result !== "sent") console.error(`gift email ${result}:`, res.status, await res.text());
+    return result;
   } catch (err) {
     console.error("gift email failed to send", err);
-    return false;
+    return "failed";
   }
 }
 
 export type GiftBuyerEmailInput = {
+  /** Resend Idempotency-Key, e.g. "gift-buyer-<orderId>". */
+  idempotencyKey?: string;
   /** The buyer's address, from Stripe's checkout session customer_details. */
   to: string;
   /** Null when the gift was bought without a recipient address. */
@@ -74,16 +100,16 @@ export type GiftBuyerEmailInput = {
 /**
  * The buyer's gift receipt: always carries the claim link, so the buyer can
  * share it themselves whether or not we could email the recipient. Same
- * failure contract as sendGiftEmail — logs and returns false, never throws.
+ * result contract as sendGiftEmail; never throws.
  */
-export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<boolean> {
+export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<GiftSendResult> {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.GIFT_FROM_EMAIL;
   if (!apiKey || !from) {
     console.error(
       "gift receipt not sent — RESEND_API_KEY and GIFT_FROM_EMAIL must both be set",
     );
-    return false;
+    return "not-configured";
   }
 
   try {
@@ -92,6 +118,7 @@ export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<bo
       headers: {
         authorization: `Bearer ${apiKey}`,
         "content-type": "application/json",
+        ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
       },
       body: JSON.stringify({
         from,
@@ -101,14 +128,12 @@ export async function sendGiftBuyerEmail(input: GiftBuyerEmailInput): Promise<bo
         html: buyerHtml(input.recipientEmail, input.claimUrl),
       }),
     });
-    if (!res.ok) {
-      console.error("gift receipt rejected:", res.status, await res.text());
-      return false;
-    }
-    return true;
+    const result = classify(res.status);
+    if (result !== "sent") console.error(`gift receipt ${result}:`, res.status, await res.text());
+    return result;
   } catch (err) {
     console.error("gift receipt failed to send", err);
-    return false;
+    return "failed";
   }
 }
 
