@@ -33,6 +33,20 @@ describe("createProCheckoutSession", () => {
     expect(body).not.toContain("customer_email");
     expect(body).not.toContain("trial");
   });
+  test.each(["STRIPE_PRO_PRICE_ID", "STRIPE_SECRET_KEY"])(
+    "missing %s: throws BEFORE creating a Stripe customer or writing entitlements",
+    async (name) => {
+      delete process.env[name];
+      // New user: no stored customer, so ensureStripeCustomer would POST /v1/customers.
+      const db = { query: vi.fn(async () => ({ rows: [] })) };
+      const fetchImpl = vi.fn(async () => okJson({ id: "cus_new", url: "https://checkout.stripe.com/x" }));
+      await expect(
+        createProCheckoutSession({ userId: "u1", email: "a@b.c", origin: "https://s", db }, fetchImpl),
+      ).rejects.toThrow(`${name} is not set`);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(db.query).not.toHaveBeenCalled();
+    },
+  );
   test("throws without STRIPE_PRO_PRICE_ID", async () => {
     delete process.env.STRIPE_PRO_PRICE_ID;
     const db = { query: vi.fn(async () => ({ rows: [{ stripe_customer_id: "cus_1" }] })) };

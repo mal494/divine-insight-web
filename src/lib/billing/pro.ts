@@ -70,17 +70,24 @@ export async function ensureStripeCustomer(
   return rows[0]?.stripe_customer_id ?? created.id;
 }
 
+/**
+ * Validates config BEFORE any side effect: a missing STRIPE_SECRET_KEY or
+ * STRIPE_PRO_PRICE_ID throws here, so no Stripe customer is created and no
+ * entitlements row is written for a checkout that could never start.
+ */
 export async function createProCheckoutSession(
   args: { userId: string; email: string; origin: string; db: Queryable },
   fetchImpl?: FetchLike,
 ): Promise<string> {
+  if (!process.env.STRIPE_SECRET_KEY) throw new Error("STRIPE_SECRET_KEY is not set");
+  const price = proPriceId();
   const customer = await ensureStripeCustomer(args, fetchImpl);
   const session = await stripeRequest<{ url: string }>(
     "POST",
     "/checkout/sessions",
     {
       mode: "subscription",
-      line_items: { 0: { price: proPriceId(), quantity: 1 } },
+      line_items: { 0: { price, quantity: 1 } },
       client_reference_id: args.userId,
       customer,
       metadata: { user_id: args.userId, plan: "pro" },

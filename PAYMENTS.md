@@ -245,6 +245,32 @@ Entitlements are written only by `POST /api/stripe-subscription-webhook`
 subscription from Stripe. Apply `migrations/0002_pro_subscriptions.sql` first.
 One-time orders and `/api/stripe-webhook` are unchanged.
 
+### Pro checkout kill switch (`PRO_CHECKOUT_ENABLED`)
+
+> **Land this gate before ANY `STRIPE_*` key goes into Production — even
+> `STRIPE_SECRET_KEY` alone.** Without it, a signed-in visitor hitting
+> `POST /api/pro/checkout` with only the secret key set used to create a real
+> Stripe Customer and an `incomplete` entitlements row, and only then fail
+> with 503 on the missing price id.
+
+- Server env, default **off**. Unset, empty or anything but the exact string
+  `"true"` makes `POST /api/pro/checkout` answer **503**
+  `{ "error": "checkout_paused" }` right after the 401 sign-in check, before
+  any DB read (no `hasPro`) or Stripe call.
+- When `"true"`, the route still answers **503** `checkout_unavailable` (and
+  logs the missing variable *names*) unless `STRIPE_SECRET_KEY`,
+  `STRIPE_PRO_PRICE_ID` and `STRIPE_PRO_WEBHOOK_SECRET` are all set, again
+  before any DB/Stripe work. The webhook secret is required because a
+  subscription the webhook can't verify would never grant Pro.
+- `createProCheckoutSession` independently reads `STRIPE_SECRET_KEY` and
+  `STRIPE_PRO_PRICE_ID` *before* `ensureStripeCustomer`, so a missing setting
+  can never create a customer or an entitlements row.
+- `POST /api/pro/portal` is not gated: existing customers must always be able
+  to manage or cancel.
+- Selling Pro needs both `PRO_CHECKOUT_ENABLED=true` (server, runtime) and
+  `VITE_PRO_UI_ENABLED=true` (client, build time). Turning Pro on is a Vercel
+  env change plus redeploy and needs Michael's OK.
+
 ### Double-subscription protection
 
 - `POST /api/pro/checkout` returns **409** `{ error: "already_subscribed", manage: "/api/pro/portal" }`
