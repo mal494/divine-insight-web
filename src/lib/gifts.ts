@@ -25,6 +25,8 @@ export type ClaimView = {
   claimed: boolean;
   /** The reading drawn when it was claimed, if it has been. */
   reading: unknown | null;
+  /** True when GIFT_TOKEN_TTL_DAYS is set and this unclaimed link is past it. */
+  expired: boolean;
 };
 
 /**
@@ -162,15 +164,26 @@ export async function getGiftDetails(orderId: string): Promise<GiftDetails | nul
  */
 export async function createGiftClaim(
   orderId: string,
-): Promise<{ token: string; created: boolean }> {
+): Promise<{ token: string | null; created: boolean }> {
   await ensureGiftSchema();
   const db = sql();
 
-  const token = randomToken();
+  const raw = await deriveToken(orderId);
+  if (!raw) {
+    // Fail closed: never store a usable plaintext token. The webhook answers
+    // 500 and Stripe retries once the secret is configured.
+    console.error(
+      "gift claim NOT minted: set GIFT_TOKEN_SECRET (or BETTER_AUTH_SECRET) — refusing to store an unhashed token",
+      { orderId },
+    );
+    throw new GiftTokenSecretMissingError();
+  }
+  const stored = await hashToken(raw);
+
   const rows = await db`
     with inserted as (
       insert into gift_claims (token, order_id)
-      values (${token}, ${orderId})
+      values (${stored}, ${orderId})
       on conflict (order_id) do nothing
       returning token
     )
@@ -180,7 +193,8 @@ export async function createGiftClaim(
     limit 1`;
   const row = rows[0] as { token: string; created: boolean } | undefined;
   if (!row) throw new Error(`gift claim could not be minted for order ${orderId}`);
-  return { token: row.token, created: Boolean(row.created) };
+  if (row.created) return { token: raw, created: true };
+  return { token: await displayableToken(row.token, orderId), created: false };
 }
 
 /**
@@ -189,7 +203,9 @@ export async function createGiftClaim(
  * recipient and buyer emails: if the buyer's poll could mint first, the
  * webhook would see "already created" and skip both emails. A paid gift with
  * no token yet (webhook still in flight, or retrying after a mint failure)
- * returns token: null and the buyer view keeps polling. Gifts paid before the
+ * returns token: null and the buyer view keeps polling. token is also null if
+ * a hashed token can no longer be re-derived (the secret was rotated); the
+ * recipient's link still works and support can resend it. Gifts paid before the
  * webhook always minted are healed by scripts/backfills/2026-11-gift-claim-tokens.sql.
  * Returns null for unpaid / non-gift orders.
  */
@@ -206,24 +222,87 @@ export async function getClaimForPaidGift(
      limit 1`;
   const row = rows[0] as { token: string | null } | undefined;
   if (!row) return null;
-  return { token: row.token ?? null, gift };
+  // Hashed rows are re-derived (the DB never holds the link); legacy rows
+  // hold it directly. Null if the secret changed since minting.
+  const token = row.token ? await displayableToken(row.token, orderId) : null;
+  return { token, gift };
+}
+
+type ClaimRow = {
+  stored_token: string;
+  order_id: string;
+  claimed: boolean;
+  paid_at: unknown;
+  claim_created_at: unknown;
+  sender_name: string | null;
+  note: string | null;
+};
+
+/** Find a claim by the token in the link: hashed rows first, legacy plaintext second. */
+async function findClaim(token: string): Promise<ClaimRow | null> {
+  const hashed = await hashToken(token);
+  const rows = await sql()`
+    select c.token as stored_token, c.order_id, c.claimed, o.paid_at,
+           c.created_at as claim_created_at, o.sender_name, o.note
+      from gift_claims c
+      join orders o on o.id = c.order_id
+     where (c.token = ${hashed} or c.token = ${token})
+       and o.status = 'paid'
+     order by (c.token = ${hashed}) desc
+     limit 1`;
+  return (rows[0] as ClaimRow | undefined) ?? null;
+}
+
+/**
+ * GIFT_TOKEN_TTL_DAYS as days, or null for "no expiry". Anything that is not
+ * a positive finite number is treated as unset (and logged), so a typo can
+ * never expire every outstanding gift.
+ */
+export function giftTokenTtlDays(env: Record<string, string | undefined> = process.env): number | null {
+  const raw = env.GIFT_TOKEN_TTL_DAYS?.trim();
+  if (!raw) return null;
+  const days = Number(raw);
+  if (!Number.isFinite(days) || days <= 0) {
+    console.warn("GIFT_TOKEN_TTL_DAYS is not a positive number — gift links will not expire", raw);
+    return null;
+  }
+  return days;
+}
+
+/** Whether an UNCLAIMED gift link is past its window. Claimed gifts never expire. */
+export function isClaimExpired(
+  row: { claimed: boolean; paid_at: unknown; claim_created_at: unknown },
+  now: Date = new Date(),
+  ttlDays: number | null = giftTokenTtlDays(),
+): boolean {
+  if (row.claimed || ttlDays === null) return false;
+  const from = toDate(row.paid_at) ?? toDate(row.claim_created_at);
+  if (!from) return false; // No purchase time on record: fail open for a paid gift.
+  return now.getTime() >= from.getTime() + ttlDays * 24 * 60 * 60 * 1000;
+}
+
+function toDate(value: unknown): Date | null {
+  if (value === null || value === undefined) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 /** What the claim page may show before the recipient turns their card. */
 export async function getClaim(token: string): Promise<ClaimView | null> {
   if (!isToken(token)) return null;
   await ensureGiftSchema();
-  const rows = await sql()`
-    select o.sender_name, o.note, c.claimed, c.order_id
-      from gift_claims c
-      join orders o on o.id = c.order_id
-     where c.token = ${token}
-       and o.status = 'paid'
-     limit 1`;
-  const row = rows[0] as
-    | { sender_name: string | null; note: string | null; claimed: boolean; order_id: string }
-    | undefined;
+  const row = await findClaim(token);
   if (!row) return null;
+
+  if (isClaimExpired(row)) {
+    return {
+      senderName: row.sender_name,
+      note: row.note,
+      claimed: false,
+      reading: null,
+      expired: true,
+    };
+  }
 
   let reading: unknown = null;
   if (row.claimed) {
@@ -239,6 +318,7 @@ export async function getClaim(token: string): Promise<ClaimView | null> {
     note: row.note,
     claimed: row.claimed,
     reading,
+    expired: false,
   };
 }
 
@@ -250,21 +330,36 @@ export async function getClaim(token: string): Promise<ClaimView | null> {
 export async function claimGift(
   token: string,
   reading: unknown,
-): Promise<{ ok: true } | { ok: false; reason: "not_found" | "already_claimed" }> {
+): Promise<
+  { ok: true } | { ok: false; reason: "not_found" | "already_claimed" | "expired" }
+> {
   if (!isToken(token)) return { ok: false, reason: "not_found" };
   await ensureGiftSchema();
   const db = sql();
 
+  const row = await findClaim(token);
+  if (!row) return { ok: false, reason: "not_found" };
+  if (row.claimed) return { ok: false, reason: "already_claimed" };
+  if (isClaimExpired(row)) return { ok: false, reason: "expired" };
+
   // One statement, so it is atomic: burn the token, spend the credit and store
-  // the reading together, or not at all. The `claimed = false` condition is
-  // the lock — a second tab racing the first burns nothing and gets nothing.
+  // the reading together, or not at all. `claimed = false` is the lock (a
+  // racing second tab burns nothing), and the expiry window is re-checked
+  // inside the UPDATE so GET and POST can never disagree at the boundary.
+  const ttlDays = giftTokenTtlDays();
   const done = await db`
     with burned as (
-      update gift_claims
+      update gift_claims c
          set claimed = true, claimed_at = now()
-       where token = ${token}
-         and claimed = false
-      returning order_id
+        from orders o
+       where c.token = ${row.stored_token}
+         and c.claimed = false
+         and o.id = c.order_id
+         and o.status = 'paid'
+         and (${ttlDays}::double precision is null
+              or coalesce(o.paid_at, c.created_at)
+                 + make_interval(secs => ${ttlDays}::double precision * 86400) > now())
+      returning c.order_id
     ),
     spent as (
       update orders o
@@ -281,21 +376,66 @@ export async function claimGift(
     )
     select (select order_id from burned) as order_id,
            (select id from saved) as reading_id`;
-  const row = done[0] as { order_id: string | null; reading_id: string | null } | undefined;
-  if (!row?.order_id) {
-    const exists = await db`select 1 from gift_claims where token = ${token} limit 1`;
-    return {
-      ok: false,
-      reason: exists.length > 0 ? "already_claimed" : "not_found",
-    };
+  const burned = done[0] as { order_id: string | null } | undefined;
+  if (!burned?.order_id) {
+    // Lost a race to another tab, or crossed the expiry boundary just now.
+    const again = await findClaim(token);
+    if (again && !again.claimed && isClaimExpired(again)) return { ok: false, reason: "expired" };
+    return { ok: false, reason: "already_claimed" };
   }
 
   return { ok: true };
 }
 
-/** 32 hex chars — 128 bits, URL-safe, and not derivable from the order id. */
-function randomToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
+/** Thrown when no gift token secret is configured. Never caught silently. */
+export class GiftTokenSecretMissingError extends Error {
+  constructor() {
+    super("gift token secret missing: set GIFT_TOKEN_SECRET or BETTER_AUTH_SECRET");
+    this.name = "GiftTokenSecretMissingError";
+  }
+}
+
+/** SHA-256 of the link token, lowercase hex (64 chars). What new rows store. */
+export async function hashToken(token: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  return toHex(new Uint8Array(digest));
+}
+
+/**
+ * The link token for an order, derived with the server secret. Null when no
+ * secret is configured. 128 bits (32 hex), the same shape as legacy tokens.
+ */
+export async function deriveToken(
+  orderId: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<string | null> {
+  const secret = env.GIFT_TOKEN_SECRET || env.BETTER_AUTH_SECRET;
+  if (!secret) return null;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`gift-claim:v1:${orderId}`),
+  );
+  return toHex(new Uint8Array(mac)).slice(0, 32);
+}
+
+/** Recover the link token from what a row stores, for the buyer's view. */
+async function displayableToken(stored: string, orderId: string): Promise<string | null> {
+  if (isToken(stored)) return stored; // Legacy plaintext row.
+  const derived = await deriveToken(orderId);
+  if (derived && (await hashToken(derived)) === stored) return derived;
+  console.error("gift claim link cannot be re-derived for buyer (secret changed?)", { orderId });
+  return null;
+}
+
+function toHex(bytes: Uint8Array): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 

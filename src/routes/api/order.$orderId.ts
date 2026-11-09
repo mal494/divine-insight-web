@@ -66,6 +66,11 @@ export async function handleOrderGet(
       // buyer view keeps polling.
       const claim = await getClaimForPaidGift(order.id);
       if (claim?.token) body.claimUrl = claimUrlFor(claim.token, request.url);
+      else if (claim) {
+        // Order id only, never a token: either the webhook has not minted yet
+        // (normal for a few seconds) or the link can no longer be re-derived.
+        console.info("paid gift has no buyer-visible claim link yet", { orderId: order.id });
+      }
     } catch (err) {
       // The status answer still matters more than the link; the next poll
       // retries.

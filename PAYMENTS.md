@@ -63,7 +63,22 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    so it keeps working as a keepsake.
 
 The token is the recipient's only credential - no account, no sign-in. It is
-128 bits of randomness and is not derivable from the order id.
+128 bits, derived as HMAC-SHA256(`GIFT_TOKEN_SECRET`, falling back to
+`BETTER_AUTH_SECRET`, over the order id), so it is not guessable from the order
+id. The database stores only its SHA-256 hash; the server re-derives the link
+to show the buyer. Legacy rows that still hold a plaintext token keep working
+(lookups try the hash first, then the plaintext). With no secret at all the
+mint FAILS CLOSED: the webhook answers 500 and Stripe retries, so no fresh
+plaintext token is ever stored.
+`scripts/backfills/2026-11-gift-claim-token-hashing.sql` optionally hashes the
+legacy rows (run by hand, only after the hashed-token code is stable).
+
+Expiry is OFF by default. `GIFT_TOKEN_TTL_DAYS` (a positive number of days)
+turns it on: an UNCLAIMED link then expires that many days after purchase and
+shows "This gift link has expired" with a contact-support prompt
+(`GIFT_SUPPORT_EMAIL`, optional, adds a mailto button). Claimed gifts never
+expire. Expired or problem gifts are handled by support manually (reissue or
+refund); there is no automated refund.
 
 Email delivery failures are logged, never thrown. The payment is already good
 by that point, and a non-2xx would make Stripe retry the charge event for days
@@ -78,6 +93,9 @@ over an email problem.
 | `RESEND_API_KEY` | Resend dashboard. Only needed for Gift Readings. |
 | `GIFT_FROM_EMAIL` | A sender verified in Resend, e.g. `Divine Insight <readings@yourdomain>`. |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
+| `GIFT_TOKEN_SECRET` | Optional. Secret for deriving gift claim tokens; falls back to `BETTER_AUTH_SECRET`. Rotating it does not break links already sent, but the buyer view can no longer re-show unclaimed ones. |
+| `GIFT_TOKEN_TTL_DAYS` | Optional. Unset = gift links never expire (current policy). A positive number = unclaimed links expire that many days after purchase. |
+| `GIFT_SUPPORT_EMAIL` | Optional. Shown as a contact button on the expired-gift page. |
 
 `go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
 `GIFT_FROM_EMAIL` is missing, and injects those values into the deployment with

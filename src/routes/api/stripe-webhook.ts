@@ -130,7 +130,7 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   }
 
   if (gift) {
-    let claim: { token: string; created: boolean };
+    let claim: Awaited<ReturnType<typeof createGiftClaim>>;
     try {
       claim = await createGiftClaim(orderId);
     } catch (err) {
@@ -150,6 +150,12 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     // Each email is reserved (recipient_emailed_at / buyer_emailed_at) before
     // it is sent, so it goes out exactly once whoever minted the token and
     // however often Stripe delivers. A failed send releases the reservation.
+    if (!claim.token) {
+      // Existing hashed token that can no longer be re-derived (secret
+      // rotated): the recipient's link still works; support can resend.
+      console.error("gift claim link not re-derivable; emails skipped", { orderId });
+      return new Response(result, { status: 200 });
+    }
     const claimUrl = claimUrlFor(claim.token, request.url);
     const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
     try {
