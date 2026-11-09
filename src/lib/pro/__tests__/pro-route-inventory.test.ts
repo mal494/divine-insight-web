@@ -7,9 +7,9 @@
  * declared below as Pro-GATED or Pro-AWARE (reads entitlement but is not
  * gated), so a new Pro check can't appear — or disappear — unnoticed.
  *
- * Today no Pro-only operation exists: Celtic Cross and 1-to-5 vector scoring
- * are not built, the Journal is client-only, and the three-card spread is
- * drawn client-side with no endpoint.
+ * Pro-gated today: the user-scoped Journal API (/api/pro/journal*). Celtic
+ * Cross and 1-to-5 vector scoring are not built and have no endpoint; the
+ * three-card spread is drawn client-side with no endpoint.
  *
  * Free / one-time-paid entry points must never be Pro-gated. Note this
  * asserts "no Pro check", not "no session": one-time orders are authorized by
@@ -43,7 +43,7 @@ const SRC = join(process.cwd(), "src");
 const API_DIR = join(SRC, "routes/api");
 
 /** API routes that must enforce Pro (401 signed out / 403 not Pro). */
-const PRO_GATED_ROUTES: string[] = [];
+const PRO_GATED_ROUTES: string[] = ["pro/journal.ts", "pro/journal.$entryId.ts"];
 
 /** API routes that read the entitlement but are deliberately not gated by it. */
 const PRO_AWARE_ROUTES = [
