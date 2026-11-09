@@ -262,9 +262,10 @@ async function deliverOnce(
   kind: GiftEmailKind,
   send: () => Promise<GiftSendResult>,
 ): Promise<"done" | "retry"> {
-  const lease = await reserveGiftEmail(orderId, kind);
-  if (lease === "sent" || lease === "gave-up") return "done";
-  if (lease === "busy") return "retry";
+  const reservation = await reserveGiftEmail(orderId, kind);
+  if (reservation.status === "sent" || reservation.status === "gave-up") return "done";
+  if (reservation.status !== "reserved") return "retry";
+  const { lease } = reservation;
   let result: GiftSendResult;
   try {
     result = await send();
@@ -277,11 +278,12 @@ async function deliverOnce(
     return "done";
   }
   if (result === "rejected") {
-    await releaseGiftEmail(orderId, kind, { permanent: true });
+    const outcome = await releaseGiftEmail(orderId, kind, lease, { permanent: true });
+    if (outcome === "retry") return "retry"; // lease lost to another delivery
     console.error("gift email permanently rejected; not retrying", { orderId, kind });
     return "done";
   }
-  const next = await releaseGiftEmail(orderId, kind);
+  const next = await releaseGiftEmail(orderId, kind, lease);
   if (next === "gave-up") {
     // Never let a long provider outage make Stripe disable the endpoint. The
     // buyer still has the claim link on their confirmation view.

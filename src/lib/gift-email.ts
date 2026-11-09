@@ -13,12 +13,13 @@
  *
  * Results (never thrown):
  *   "sent"           — Resend accepted it.
- *   "failed"         — transient (network error, timeout, 5xx, 408, 429, or a
- *                      409 `concurrent_idempotent_requests`): the webhook
+ *   "failed"         — transient (network error, timeout, 5xx, 408, 429,
+ *                      401/403, or any 409 other than
+ *                      `invalid_idempotent_request`): the webhook
  *                      answers non-2xx so Stripe retries (bounded: see
  *                      GIFT_EMAIL_MAX_ATTEMPTS / GIFT_EMAIL_GIVE_UP_HOURS in
  *                      ~/lib/gifts).
- *   "rejected"       — permanent 4xx (e.g. invalid address), including a 409
+ *   "rejected"       — other 4xx (e.g. 422 invalid address), and a 409
  *                      `invalid_idempotent_request` (key reused with a
  *                      different body; retrying can never succeed): logged,
  *                      not retried.
@@ -46,16 +47,25 @@ export function giftEmailConfigured(): boolean {
 export const RESEND_TIMEOUT_MS = 12_000;
 
 /**
- * Map a Resend response to a result. A 409 is only transient when another
- * request with the same Idempotency-Key is still in flight
- * (`concurrent_idempotent_requests`); `invalid_idempotent_request` (same key,
- * different payload) or any unrecognised 409 can never succeed on retry.
+ * Map a Resend response to a result. "failed" is retried, but only within the
+ * attempt/age cap (GIFT_EMAIL_MAX_ATTEMPTS / GIFT_EMAIL_GIVE_UP_HOURS), so a
+ * wrong guess here costs a few retries, never an endless loop.
+ *   - 409 `invalid_idempotent_request` (same key, different payload) can never
+ *     succeed on retry: "rejected". Every other 409 (`concurrent_idempotent_
+ *     requests`, `resource_locked`, unknown or unparseable) is "failed".
+ *   - 401 / 403 usually mean a wrong or restricted RESEND_API_KEY or an
+ *     unverified sender domain: configuration, not the email. "failed", so
+ *     fixing the key within the cap still delivers (see PAYMENTS.md for
+ *     recovering rows that already gave up).
+ *   - 408 / 429 / 5xx: "failed". Any other 4xx (e.g. 422 invalid address):
+ *     "rejected".
  */
 export function classifyResend(status: number, errorName?: string | null): GiftSendResult {
   if (status >= 200 && status < 300) return "sent";
   if (status === 409) {
-    return errorName === "concurrent_idempotent_requests" ? "failed" : "rejected";
+    return errorName === "invalid_idempotent_request" ? "rejected" : "failed";
   }
+  if (status === 401 || status === 403) return "failed";
   if (status === 408 || status === 429 || status >= 500) return "failed";
   return "rejected";
 }

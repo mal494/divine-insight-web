@@ -97,10 +97,10 @@ describe("handleStripeWebhook", () => {
     sent = new Set();
     mocks.reserveGiftEmail.mockImplementation(async (orderId: string, kind: string) => {
       const key = `${orderId}:${kind}`;
-      if (sent.has(key)) return "sent";
-      if (reserved.has(key)) return "busy";
+      if (sent.has(key)) return { status: "sent" };
+      if (reserved.has(key)) return { status: "busy" };
       reserved.add(key);
-      return "reserved";
+      return { status: "reserved", lease: `lease:${key}` };
     });
     mocks.markGiftEmailSent.mockImplementation(async (orderId: string, kind: string) => {
       reserved.delete(`${orderId}:${kind}`);
@@ -278,6 +278,7 @@ describe("handleStripeWebhook", () => {
     expect(mocks.releaseGiftEmail).toHaveBeenCalledWith(
       "11111111-1111-4111-8111-111111111111",
       "recipient",
+      "lease:11111111-1111-4111-8111-111111111111:recipient",
     );
     expect(mocks.markGiftEmailSent).not.toHaveBeenCalled();
     const retry = await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
@@ -309,7 +310,7 @@ describe("handleStripeWebhook", () => {
       note: null,
     });
     vi.spyOn(console, "error").mockImplementation(() => {});
-    mocks.reserveGiftEmail.mockResolvedValueOnce("busy");
+    mocks.reserveGiftEmail.mockResolvedValueOnce({ status: "busy" });
     const res = await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
     expect(res.status).toBe(500);
     expect(mocks.sendGiftEmail).not.toHaveBeenCalled();
