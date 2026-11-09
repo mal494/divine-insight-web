@@ -1,7 +1,11 @@
 -- Pro Journal: user-scoped entries. NOT applied automatically. Apply after 0001/0002:
 --   psql "$DATABASE_URL_UNPOOLED" -f migrations/0003_journal_entries.sql
 -- Rollback (destroys all journal entries):
---   drop table if exists journal_entries;
+--   1. Back up first, e.g.
+--        pg_dump "$DATABASE_URL_UNPOOLED" -t journal_entries > journal_entries_backup.sql
+--   2. Only with the Pro UI flag (VITE_PRO_UI_ENABLED) off, so no client is
+--      reading or writing the Journal while the table disappears.
+--   3. drop table if exists journal_entries;
 -- Every query in src/lib/journal/store.ts filters by user_id, so a user can
 -- only ever read or change their own rows.
 begin;
