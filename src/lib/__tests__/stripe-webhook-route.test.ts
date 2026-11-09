@@ -5,6 +5,8 @@ const mocks = vi.hoisted(() => ({
   markPaid: vi.fn(),
   getGiftDetails: vi.fn(),
   createGiftClaim: vi.fn(),
+  reserveGiftEmail: vi.fn(),
+  releaseGiftEmail: vi.fn(),
   sendGiftEmail: vi.fn(),
   sendGiftBuyerEmail: vi.fn(),
   claimUrlFor: vi.fn(),
@@ -18,10 +20,20 @@ vi.mock("~/lib/orders", () => ({
   markPaid: mocks.markPaid,
 }));
 
-vi.mock("~/lib/gifts", () => ({
-  getGiftDetails: mocks.getGiftDetails,
-  createGiftClaim: mocks.createGiftClaim,
-}));
+vi.mock("~/lib/gifts", () => {
+  class GiftSchemaMissingError extends Error {}
+  return {
+    GIFT_EMAIL_MIGRATION: "migrations/0005_gift_claim_email_flags.sql",
+    GiftSchemaMissingError,
+    getGiftDetails: mocks.getGiftDetails,
+    createGiftClaim: mocks.createGiftClaim,
+    reserveGiftEmail: mocks.reserveGiftEmail,
+    releaseGiftEmail: mocks.releaseGiftEmail,
+  };
+});
+
+/** Stateful stand-in for the emailed_at flags: true once per (order, kind). */
+let reserved = new Set<string>();
 
 vi.mock("~/lib/orphan-payments", () => ({
   recordOrphanPayment: vi.fn().mockResolvedValue(true),
@@ -75,6 +87,16 @@ describe("handleStripeWebhook", () => {
     mocks.createGiftClaim.mockResolvedValue({ token: "token_123", created: true });
     mocks.sendGiftEmail.mockResolvedValue(true);
     mocks.sendGiftBuyerEmail.mockResolvedValue(true);
+    reserved = new Set();
+    mocks.reserveGiftEmail.mockImplementation(async (orderId: string, kind: string) => {
+      const key = `${orderId}:${kind}`;
+      if (reserved.has(key)) return false;
+      reserved.add(key);
+      return true;
+    });
+    mocks.releaseGiftEmail.mockImplementation(async (orderId: string, kind: string) => {
+      reserved.delete(`${orderId}:${kind}`);
+    });
     mocks.claimUrlFor.mockReturnValue("https://divine.example/claim/token_123");
   });
 
@@ -209,7 +231,59 @@ describe("handleStripeWebhook", () => {
     expect(mocks.getGiftDetails).toHaveBeenCalledTimes(3);
     expect(mocks.createGiftClaim).toHaveBeenCalledTimes(3);
     expect(mocks.sendGiftEmail).toHaveBeenCalledTimes(1);
-    expect(mocks.claimUrlFor).toHaveBeenCalledTimes(1);
+  });
+
+  test("emails go out once even when the token was minted elsewhere first (created:false)", async () => {
+    mocks.getGiftDetails.mockResolvedValue({
+      orderId: "11111111-1111-4111-8111-111111111111",
+      recipientEmail: "recipient@example.com",
+      senderName: null,
+      note: null,
+    });
+    mocks.createGiftClaim.mockResolvedValue({ token: "token_123", created: false });
+    const event = checkoutEvent("checkout.session.completed");
+    (event.data.object as Record<string, unknown>).customer_details = { email: "buyer@example.com" };
+
+    mocks.markPaid.mockResolvedValueOnce("already-paid").mockResolvedValue("duplicate");
+    await handleStripeWebhook(requestFor(event));
+    await handleStripeWebhook(requestFor(event));
+    expect(mocks.sendGiftEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test("a failed send releases the reservation so a later delivery can retry", async () => {
+    mocks.getGiftDetails.mockResolvedValue({
+      orderId: "11111111-1111-4111-8111-111111111111",
+      recipientEmail: "recipient@example.com",
+      senderName: null,
+      note: null,
+    });
+    mocks.sendGiftEmail.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mocks.markPaid.mockResolvedValueOnce("applied").mockResolvedValue("duplicate");
+    await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
+    expect(mocks.releaseGiftEmail).toHaveBeenCalledWith(
+      "11111111-1111-4111-8111-111111111111",
+      "recipient",
+    );
+    await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
+    await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
+    expect(mocks.sendGiftEmail).toHaveBeenCalledTimes(2);
+  });
+
+  test("missing 0005 email-flag columns → 500 so Stripe retries (token already minted)", async () => {
+    const { GiftSchemaMissingError } = await import("~/lib/gifts");
+    mocks.getGiftDetails.mockResolvedValue({
+      orderId: "11111111-1111-4111-8111-111111111111",
+      recipientEmail: "recipient@example.com",
+      senderName: null,
+      note: null,
+    });
+    mocks.reserveGiftEmail.mockRejectedValue(new GiftSchemaMissingError("x"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await handleStripeWebhook(requestFor(checkoutEvent("checkout.session.completed")));
+    expect(res.status).toBe(500);
+    expect(mocks.createGiftClaim).toHaveBeenCalledTimes(1);
+    expect(mocks.sendGiftEmail).not.toHaveBeenCalled();
   });
 
   describe("paid gift delivery", () => {

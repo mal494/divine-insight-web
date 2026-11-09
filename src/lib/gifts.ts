@@ -27,7 +27,22 @@ export type ClaimView = {
   reading: unknown | null;
 };
 
+/**
+ * Create the original gift_claims table on first use, at most once per server
+ * process (the dedupe + index statements are not free). New columns go in
+ * migrations/ — the email flags come from GIFT_EMAIL_MIGRATION.
+ */
 async function ensureGiftSchema(): Promise<void> {
+  giftSchemaReady ??= bootstrapGiftSchema().catch((err: unknown) => {
+    giftSchemaReady = null;
+    throw err;
+  });
+  return giftSchemaReady;
+}
+
+let giftSchemaReady: Promise<void> | null = null;
+
+async function bootstrapGiftSchema(): Promise<void> {
   await ensureSchema();
   await sql()`
     create table if not exists gift_claims (
@@ -56,6 +71,58 @@ async function ensureGiftSchema(): Promise<void> {
   await sql()`
     create unique index if not exists gift_claims_order_id_uidx
       on gift_claims (order_id)`;
+}
+
+export const GIFT_EMAIL_MIGRATION = "migrations/0005_gift_claim_email_flags.sql";
+
+export class GiftSchemaMissingError extends Error {
+  constructor(cause: unknown) {
+    super(`gift email flags missing: apply ${GIFT_EMAIL_MIGRATION}`, { cause });
+    this.name = "GiftSchemaMissingError";
+  }
+}
+
+export type GiftEmailKind = "recipient" | "buyer";
+
+/**
+ * Reserve the one send of a gift email. Returns true for exactly one caller
+ * per (order, kind), whichever code path minted the token and however many
+ * times Stripe delivers the event. Call releaseGiftEmail if the send fails.
+ */
+export async function reserveGiftEmail(orderId: string, kind: GiftEmailKind): Promise<boolean> {
+  await ensureGiftSchema();
+  const db = sql();
+  try {
+    const rows =
+      kind === "recipient"
+        ? await db`
+            update gift_claims set recipient_emailed_at = now()
+             where order_id = ${orderId} and recipient_emailed_at is null
+            returning order_id`
+        : await db`
+            update gift_claims set buyer_emailed_at = now()
+             where order_id = ${orderId} and buyer_emailed_at is null
+            returning order_id`;
+    return rows.length > 0;
+  } catch (err) {
+    if (isMissingColumn(err)) throw new GiftSchemaMissingError(err);
+    throw err;
+  }
+}
+
+/** Undo a reservation after a failed send, so a later delivery may retry. */
+export async function releaseGiftEmail(orderId: string, kind: GiftEmailKind): Promise<void> {
+  const db = sql();
+  if (kind === "recipient") {
+    await db`update gift_claims set recipient_emailed_at = null where order_id = ${orderId}`;
+  } else {
+    await db`update gift_claims set buyer_emailed_at = null where order_id = ${orderId}`;
+  }
+}
+
+function isMissingColumn(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === "42703" || code === "42P01";
 }
 
 /** Read the gift fields captured at checkout. Null when it is not a gift order. */
@@ -89,9 +156,9 @@ export async function getGiftDetails(orderId: string): Promise<GiftDetails | nul
  * recipient never gets two different links for one gift.
  *
  * `created` is true only for the call that actually inserted the row, which is
- * how the webhook sends the recipient/buyer emails exactly once even when
- * Stripe retries or delivers two events concurrently. The webhook is the ONLY
- * caller: nothing else may mint, or it would swallow those emails.
+ * used for the support log line. The emails themselves are exactly-once via
+ * reserveGiftEmail (recipient_emailed_at / buyer_emailed_at), independent of
+ * who minted. The webhook is still the only minter.
  */
 export async function createGiftClaim(
   orderId: string,

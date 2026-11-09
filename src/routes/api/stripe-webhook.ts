@@ -19,7 +19,14 @@
  */
 import { createFileRoute } from "@tanstack/react-router";
 import { claimUrlFor, sendGiftBuyerEmail, sendGiftEmail } from "~/lib/gift-email";
-import { createGiftClaim, getGiftDetails } from "~/lib/gifts";
+import {
+  GIFT_EMAIL_MIGRATION,
+  GiftSchemaMissingError,
+  createGiftClaim,
+  getGiftDetails,
+  releaseGiftEmail,
+  reserveGiftEmail,
+} from "~/lib/gifts";
 import { markPaid } from "~/lib/orders";
 import { recordOrphanPayment, type OrphanReason } from "~/lib/orphan-payments";
 import { verifyStripeSignature } from "~/lib/stripe-signature";
@@ -131,40 +138,50 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
       return new Response("gift delivery pending", { status: 500 });
     }
 
-    if (claim.created) {
-      const claimUrl = claimUrlFor(claim.token, request.url);
-      if (!gift.recipientEmail) {
-        // Support breadcrumb. Never log the token itself: the link is the
-        // recipient's only credential.
-        console.warn(
-          "paid gift has no recipient email — claim link shown to buyer only",
-          { orderId, sessionId: session.id ?? null },
-        );
+    if (claim.created && !gift.recipientEmail) {
+      // Support breadcrumb. Never log the token itself: the link is the
+      // recipient's only credential.
+      console.warn(
+        "paid gift has no recipient email — claim link shown to buyer only",
+        { orderId, sessionId: session.id ?? null },
+      );
+    }
+
+    // Each email is reserved (recipient_emailed_at / buyer_emailed_at) before
+    // it is sent, so it goes out exactly once whoever minted the token and
+    // however often Stripe delivers. A failed send releases the reservation.
+    const claimUrl = claimUrlFor(claim.token, request.url);
+    const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
+    try {
+      if (gift.recipientEmail && (await reserveGiftEmail(orderId, "recipient"))) {
+        const sent = await sendGiftEmail({
+          to: gift.recipientEmail,
+          senderName: gift.senderName,
+          note: gift.note,
+          claimUrl,
+        });
+        if (!sent) await releaseGiftEmail(orderId, "recipient");
       }
-      try {
-        if (gift.recipientEmail) {
-          await sendGiftEmail({
-            to: gift.recipientEmail,
-            senderName: gift.senderName,
-            note: gift.note,
-            claimUrl,
-          });
-        }
-        const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
-        if (buyerEmail) {
-          await sendGiftBuyerEmail({
-            to: buyerEmail,
-            recipientEmail: gift.recipientEmail,
-            claimUrl,
-          });
-        } else {
-          console.warn("paid gift has no buyer email for receipt", { orderId });
-        }
-      } catch (err) {
-        // Email is best-effort; the claim link already exists and the buyer
-        // sees it on the confirmation view.
-        console.error("gift email failed for order", orderId, err);
+      if (!buyerEmail) {
+        if (claim.created) console.warn("paid gift has no buyer email for receipt", { orderId });
+      } else if (await reserveGiftEmail(orderId, "buyer")) {
+        const sent = await sendGiftBuyerEmail({
+          to: buyerEmail,
+          recipientEmail: gift.recipientEmail,
+          claimUrl,
+        });
+        if (!sent) await releaseGiftEmail(orderId, "buyer");
       }
+    } catch (err) {
+      if (err instanceof GiftSchemaMissingError) {
+        // Fail closed like the order-access schema: Stripe retries until the
+        // migration is applied. The claim token already exists.
+        console.error("gift email flags missing — apply", GIFT_EMAIL_MIGRATION, { orderId });
+        return new Response("gift delivery pending", { status: 500 });
+      }
+      // Email is best-effort; the claim link already exists and the buyer
+      // sees it on the confirmation view.
+      console.error("gift email failed for order", orderId, err);
     }
   }
 

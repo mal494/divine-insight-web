@@ -50,9 +50,12 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    link ("Share this link with the person you're gifting").
    The buyer is also always shown the link on the gift confirmation view:
    `/api/order/<id>` returns `claimUrl` for a paid gift once the webhook has
-   minted it. That route is read-only and never mints: the webhook is the only
-   minter, so the emails go out exactly once (a poll that minted first would
-   make the webhook skip them). Gifts with no recipient email are logged
+   minted it. That route is read-only and never mints; the webhook is the only
+   minter. Each email is additionally reserved with `gift_claims.recipient_emailed_at`
+   / `buyer_emailed_at` (migration `0005_gift_claim_email_flags.sql`, apply
+   before deploy) so it goes out exactly once whoever minted the token; a
+   failed send clears the flag. Without 0005 the webhook answers 500 for paid
+   gifts after minting (Stripe retries). Gifts with no recipient email are logged
    (order id only, never the token) for support.
 3. The recipient opens the link, turns one card, and that POST burns the token,
    spends the credit, and stores the reading.

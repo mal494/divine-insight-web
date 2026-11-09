@@ -12,7 +12,13 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const ORDER = "55555555-5555-4555-8555-555555555555";
 
-type Row = { token: string; order_id: string; claimed: boolean };
+type Row = {
+  token: string;
+  order_id: string;
+  claimed: boolean;
+  recipient_emailed_at?: Date | null;
+  buyer_emailed_at?: Date | null;
+};
 let order: {
   id: string;
   sku: string;
@@ -56,6 +62,19 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     if (order.status === "paid") order.credits = Math.max(order.credits - 1, 0);
     readings.push({ order_id: c.order_id, payload: JSON.parse(payload) });
     return [{ order_id: c.order_id, reading_id: readingId }];
+  }
+  const flag = /^update gift_claims set (recipient|buyer)_emailed_at = (now\(\)|null)/.exec(q);
+  if (flag) {
+    const key = `${flag[1]}_emailed_at` as "recipient_emailed_at" | "buyer_emailed_at";
+    const c = claims.find((x) => x.order_id === values[0]);
+    if (!c) return [];
+    if (flag[2] === "null") {
+      c[key] = null;
+      return [];
+    }
+    if (c[key]) return [];
+    c[key] = new Date();
+    return [{ order_id: c.order_id }];
   }
   if (q.startsWith("select 1 from gift_claims where token")) {
     return claims.some((c) => c.token === values[0]) ? [{}] : [];
@@ -183,6 +202,22 @@ describe("poll-before-webhook race", () => {
     expect(mocks.sendGiftEmail).not.toHaveBeenCalled();
     expect(mocks.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
     expect(((await (await poll()).json()) as Record<string, unknown>).claimUrl).toContain("/claim/");
+  });
+});
+
+describe("token minted outside the webhook first", () => {
+  test("a pre-existing token (e.g. backfill) still gets both emails exactly once", async () => {
+    order.status = "paid";
+    claims.push({ token: "9".repeat(32), order_id: ORDER, claimed: false });
+    mocks.markPaid.mockResolvedValue("already-paid");
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await handleStripeWebhook(webhook());
+    mocks.markPaid.mockResolvedValue("duplicate");
+    await handleStripeWebhook(webhook());
+    expect(mocks.sendGiftEmail).toHaveBeenCalledTimes(1);
+    expect(mocks.sendGiftBuyerEmail).toHaveBeenCalledTimes(1);
+    expect(claims[0].recipient_emailed_at).toBeInstanceOf(Date);
+    expect(claims[0].buyer_emailed_at).toBeInstanceOf(Date);
   });
 });
 
