@@ -63,7 +63,9 @@ bun run dev          # dev server on http://localhost:3000
 ## Vercel
 
 `vercel.json` sets the project build command to `bash ./build-vercel.sh`.
-`bun run go-live` runs that script, then `vercel deploy --prebuilt`.
+`bun run go-live` runs that script, then `vercel deploy --prebuilt --prod`
+(see "go-live.sh" below). Normally you don't need it: the GitHub integration
+deploys `main` to production on merge.
 
 `build-vercel.sh` does three things:
 
@@ -83,9 +85,11 @@ None are required to build or run the dev server. These matter at deploy time:
 
 | Variable | Required by | Purpose |
 |----------|-------------|---------|
-| `VERCEL_TOKEN` | `bun run go-live` | Vercel deploy token (collected from the owner) |
+| `VERCEL_TOKEN` | `bun run go-live` | Vercel deploy token (collected from the owner). Environment only; never passed as `--token` |
+| `GO_LIVE_TARGET` / `GO_LIVE_ENV_FILE` / `GO_LIVE_SYNC_ENV` / `GO_LIVE_MIGRATIONS` + `DATABASE_URL_UNPOOLED` / `GO_LIVE_SCHEMA_CONFIRMED` / `GO_LIVE_SET_STANDARD_PROTECTION` | `bun run go-live` | See "go-live.sh" below |
 | `DATABASE_URL` | runtime queries via `src/db.ts` | Neon Postgres connection string — resolved lazily, so the site builds & serves without it; only actual queries throw |
 | `STRIPE_WEBHOOK_SECRET` | `/api/stripe-webhook` | Stripe signing secret (`whsec_...`). Required for paid orders to flip to `paid` |
+| `GIFT_TOKEN_SECRET` | gift claim-link HMAC (#33) | Optional but strongly recommended; `go-live.sh` accepts it in `GO_LIVE_ENV_FILE`, uploads it with `GO_LIVE_SYNC_ENV=1`, and warns when it is missing |
 | `RESEND_API_KEY` + `GIFT_FROM_EMAIL` | gift emails via `src/lib/gift-email.ts` | Required to send Gift Reading claim emails |
 | `PUBLIC_SITE_URL` | gift claim-link builder | Optional origin override for `/claim/<token>` links in email |
 | `SITE_URL` | optional, og:url/og:image/canonical tags | The real production origin. Falls back to `VERCEL_PROJECT_PRODUCTION_URL` on Vercel, then to a relative path. **Never hardcode a sandbox domain here** |
@@ -100,11 +104,26 @@ None are required to build or run the dev server. These matter at deploy time:
 | `GEMINI_PROXY_RATE_LIMIT_PREFIX` | Gemini proxy limiter | Optional Redis key namespace (`gemini-proxy:v1` default) |
 | `VERCEL_SCOPE` / `VERCEL_TEAM_ID` / `VERCEL_PROJECT_NAME` | optional | Overrides for `go-live.sh` team/project resolution |
 
-`go-live.sh` fails fast when `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
-`GIFT_FROM_EMAIL` is missing, and passes them to Vercel with `-e` so a deploy
-cannot silently go out without payment/gift-email configuration. `DATABASE_URL`
-is forwarded the same way when it is set. A local `.env` is not read by the
-deploy; export the variables in the shell that runs `bun run go-live`.
+### go-live.sh (manual, owner-only)
+
+`go-live.sh` is the manual fallback deploy. It never runs on its own. What it does:
+
+- **Target.** It deploys to production with `--prod` by default; set `GO_LIVE_TARGET=preview` for a preview.
+- **Pinned CLI.** It uses `vercel@$VERCEL_CLI_VERSION` (pinned in the script), not `@latest`.
+- **No secrets on the command line.**
+  - The CLI reads `VERCEL_TOKEN` from the environment. REST calls get the token through a curl config on stdin.
+  - Runtime secrets (`DATABASE_URL`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, `GIFT_FROM_EMAIL`) must already be set in the Vercel project's env for the target. The script only checks their names.
+  - `GO_LIVE_SYNC_ENV=1` uploads the ones exported in your shell, or the ones in `GO_LIVE_ENV_FILE`, through stdin with `vercel env add`. The env file is a `KEY=VALUE` file that is parsed, never sourced, and only allowlisted keys are accepted.
+  - Variables that already exist are skipped. `GO_LIVE_SYNC_OVERWRITE=1` lists them and replaces them only after you type `overwrite`.
+- **Schema first.** A production deploy refuses to start until you do one of two things:
+  - Apply named migrations with the opt-in step, `GO_LIVE_MIGRATIONS="0004_payments_schema.sql" DATABASE_URL_UNPOOLED=… bun run go-live`.
+    - First it proves the URL is this project's database: host (pooler suffix ignored), port and database name must match the target's `DATABASE_URL` from `vercel env pull`. Only if that value can't be read at all (e.g. it is sensitive and can't be pulled) does it compare host and database name against `GO_LIVE_EXPECTED_DB_HOST` and `GO_LIVE_EXPECTED_DB_NAME` instead; those never override a real mismatch. Any mismatch aborts.
+    - The URL is strictly validated by `scripts/pg-url.mjs`: Postgres scheme, a single host, user, password and database, `sslmode` require or stricter, and no pooler host.
+    - It asks you to type `apply`. The password goes to psql through libpq env vars, not argv.
+  - Or confirm you applied them yourself with `GO_LIVE_SCHEMA_CONFIRMED=1`.
+
+  After the deploy it reads `/api/health/payments` when that route exists.
+- **Deployment protection is never disabled.** Previews share the production database, so they must stay protected. The script prints the current setting. `GO_LIVE_SET_STANDARD_PROTECTION=1` switches the project to Standard Protection: production domains public, previews and deployment URLs protected.
 
 Pro does not read an env var. Its publishable key and price id are the
 placeholder constants in `src/lib/stripe-checkout.ts`.
