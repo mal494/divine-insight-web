@@ -7,24 +7,36 @@
  * never verified, and the copy frames the tip as a gift, never a purchase and
  * never "pay or the site dies" pressure.
  *
- * All URLs come from TIP_LINKS in ~/lib/payments.ts (single source of truth);
- * nothing is hardcoded. SSR-safe: renders static, deterministic content only.
+ * URLs come from `resolveTipLinks` in ~/lib/payments.ts: production builds
+ * use the live tip links; preview/dev builds use TEST-mode links from the
+ * VITE_STRIPE_TIP_LINK_* env vars, and the rail hides itself when those are
+ * missing — a non-production build never links to live checkout.
+ * SSR-safe: resolved at build time, so server and client render the same.
  */
 import {
   TIP_10_PRICE,
   TIP_3_PRICE,
   TIP_5_PRICE,
-  TIP_LINKS,
   formatPrice,
+  resolveTipLinks,
 } from "~/lib/payments";
 
-const TIPS = [
-  { label: `Tip $${formatPrice(TIP_3_PRICE)}`, href: TIP_LINKS.tip3 },
-  { label: `Tip $${formatPrice(TIP_5_PRICE)}`, href: TIP_LINKS.tip5 },
-  { label: `Tip $${formatPrice(TIP_10_PRICE)}`, href: TIP_LINKS.tip10 },
-] as const;
+/** Set from VERCEL_ENV at build time in vite.config.ts. */
+const TIP_LINKS = resolveTipLinks(
+  import.meta.env.VITE_DEPLOY_ENV as string | undefined,
+  import.meta.env as Record<string, string | undefined>,
+);
+
+const TIPS = TIP_LINKS
+  ? ([
+      { label: `Tip $${formatPrice(TIP_3_PRICE)}`, href: TIP_LINKS.tip3 },
+      { label: `Tip $${formatPrice(TIP_5_PRICE)}`, href: TIP_LINKS.tip5 },
+      { label: `Tip $${formatPrice(TIP_10_PRICE)}`, href: TIP_LINKS.tip10 },
+    ] as const)
+  : null;
 
 export function TipJar() {
+  if (!TIPS) return null;
   return (
     <section
       aria-label="Leave a tip"

@@ -19,15 +19,18 @@ scrolled past the CTA.
 1. Visitor clicks a CTA. The browser POSTs `{ sku }` to `/api/checkout` - a SKU
    key, never a price.
 2. `/api/checkout` opens a `pending` order, looks the price up in its own table
-   (`SKUS` in `src/lib/orders.ts`), and returns the Stripe payment link with
-   `?client_reference_id=<order id>` appended.
+   (`SKUS` in `src/lib/orders.ts`), and returns the Stripe payment link for the
+   current environment (`src/lib/payment-links.ts`) with
+   `?client_reference_id=<order id>` appended. It also returns a one-time
+   `accessToken` for the order (only its SHA-256 hash is stored); the browser
+   keeps it in localStorage and sends it as `x-order-token`.
 3. Visitor pays. Stripe POSTs either `checkout.session.completed` (most
    methods) or `checkout.session.async_payment_succeeded` (delayed methods) to
    `/api/stripe-webhook` with that `client_reference_id`.
 4. The webhook verifies the signature, checks `amount_total` against the SKU's
    price, and flips the order to `paid`.
-5. The section has been polling `/api/order/<id>`; it sees `paid` and unlocks
-   the draw.
+5. The section has been polling `/api/order/<id>` (with `x-order-token`); it
+   sees `paid` and unlocks the draw.
 6. When the cards are down, the page POSTs the reading to `/api/reading`, which
    spends one credit and stores it. The Reading Bundle is simply an order with
    three credits, and it unlocks the Extended Reading.
@@ -81,9 +84,33 @@ Set both before selling gifts.
   - `checkout.session.completed`
   - `checkout.session.async_payment_succeeded`
 
-**Payment links**
+**Payment links (per environment)**
 
-The four links in `src/lib/payments.ts` are Stripe Payment Links. Appending
+The four one-time SKUs open Stripe Payment Links chosen on the server by
+`src/lib/payment-links.ts`:
+
+| Variable | SKU | Price |
+| --- | --- | --- |
+| `STRIPE_PAYMENT_LINK_SINGLE_INSIGHT` | `singleInsight` | 2.99 USD |
+| `STRIPE_PAYMENT_LINK_EXTENDED_READING` | `extendedReading` | 9.99 USD |
+| `STRIPE_PAYMENT_LINK_READING_BUNDLE` | `readingBundle` | 19.99 USD |
+| `STRIPE_PAYMENT_LINK_GIFT_READING` | `giftReading` | 5.00 USD |
+
+- **Production** (`VERCEL_ENV=production`): the env var if set (must be a
+  live-mode `https://buy.stripe.com/…` link), otherwise the existing live link
+  baked into `LIVE_PAYMENT_LINK_DEFAULTS`.
+- **Preview, development, local**: the env var is required and must be a
+  TEST-mode link (`https://buy.stripe.com/test_…`). Unset or live-mode makes
+  `/api/checkout` answer 503 `checkout_unavailable` (and log which variable is
+  wrong) before any order is written. It never falls back to a live link.
+
+Tips are client-side links. Production builds use the live tip links; other
+builds read `VITE_STRIPE_TIP_LINK_3`, `VITE_STRIPE_TIP_LINK_5` and
+`VITE_STRIPE_TIP_LINK_10` (build-time, test-mode only) and hide the tip rail
+if any is missing. The build learns its environment from `VERCEL_ENV` via
+`vite.config.ts`.
+
+Appending
 `?client_reference_id=<uuid>` works on them out of the box - no dashboard change
 needed. Just do not edit a link's price in the dashboard without updating
 `SKUS`, because the webhook compares the two and refuses to fulfil on a
@@ -104,7 +131,9 @@ End to end: open a reading, click the CTA, and pay with the
 seconds of the receipt, without a refresh.
 
 To check the gate actually holds, open `/api/order/<a made-up uuid>` - it must
-answer 404, and `/api/reading` with that id must answer 402. `/claim/<junk>`
+answer 404, and `/api/reading` with that id must answer 402. The same must hold
+for a real order id sent without its `x-order-token` (orders created before
+access tokens existed have no stored hash and are still readable by id). `/claim/<junk>`
 must show the expired-link page.
 
 ### Unit tests

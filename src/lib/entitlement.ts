@@ -22,6 +22,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Sku } from "~/lib/payments";
 
 const STORAGE_PREFIX = "di.order.";
+/** The order's access token lives next to its id: `di.order.<sku>.token`. */
+const TOKEN_SUFFIX = ".token";
+/** Header the order endpoints read the access token from (~/lib/order-access). */
+export const ORDER_TOKEN_HEADER = "x-order-token";
+
+/** Headers for an order request; pre-token (legacy) orders send none. */
+export function orderTokenHeaders(token: string | null): Record<string, string> {
+  return token ? { [ORDER_TOKEN_HEADER]: token } : {};
+}
 const POLL_INTERVAL_MS = 3000;
 /** Stop polling after 20 minutes of a tab left open on the Stripe step. */
 const POLL_TIMEOUT_MS = 20 * 60 * 1000;
@@ -158,6 +167,8 @@ export function useEntitlement(
   const skusRef = useRef<Sku[]>([primary, ...(options?.alsoAccept ?? [])]);
   /** The order currently holding credits — the one recordReading spends from. */
   const activeOrderId = useRef<string | null>(null);
+  /** Access tokens by order id, read from localStorage alongside the ids. */
+  const orderTokens = useRef<Map<string, string | null>>(new Map());
   const pollTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollStartedAt = useRef<number>(0);
 
@@ -178,13 +189,20 @@ export function useEntitlement(
     for (const sku of skusRef.current) {
       const id = window.localStorage.getItem(STORAGE_PREFIX + sku);
       if (!id) continue;
+      const token = window.localStorage.getItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
+      orderTokens.current.set(id, token);
       let view: OrderView | null = null;
       try {
-        const res = await fetch(`/api/order/${id}`, { cache: "no-store" });
+        const res = await fetch(`/api/order/${id}`, {
+          cache: "no-store",
+          headers: orderTokenHeaders(token),
+        });
         if (res.status === 404) {
-          // The order no longer exists (database reset, stale id). Forget it
-          // rather than polling a ghost forever.
+          // The order no longer exists (database reset, stale id) or this
+          // browser no longer holds its token. Forget it rather than polling
+          // a ghost forever.
           window.localStorage.removeItem(STORAGE_PREFIX + sku);
+          window.localStorage.removeItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
           continue;
         }
         if (!res.ok) continue;
@@ -251,11 +269,18 @@ export function useEntitlement(
           setStatus("unavailable");
           return;
         }
-        const { orderId, url } = (await res.json()) as {
+        const { orderId, accessToken, url } = (await res.json()) as {
           orderId: string;
+          accessToken?: string;
           url: string;
         };
         window.localStorage.setItem(STORAGE_PREFIX + sku, orderId);
+        if (accessToken) {
+          window.localStorage.setItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX, accessToken);
+        } else {
+          window.localStorage.removeItem(STORAGE_PREFIX + sku + TOKEN_SUFFIX);
+        }
+        orderTokens.current.set(orderId, accessToken ?? null);
         if (!skusRef.current.includes(sku)) skusRef.current.push(sku);
         setStatus("awaiting-payment");
         // Fallback only when a popup was actually blocked.
@@ -283,7 +308,10 @@ export function useEntitlement(
       try {
         const res = await fetch("/api/reading", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            ...orderTokenHeaders(orderTokens.current.get(id) ?? null),
+          },
           body: JSON.stringify({ orderId: id, reading }),
         });
         if (res.ok) {

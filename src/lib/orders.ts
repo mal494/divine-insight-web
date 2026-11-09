@@ -16,7 +16,7 @@
  */
 import { sql } from "~/db";
 
-/** The four paid SKUs. Keys match PAYMENT_LINKS in ~/lib/payments. */
+/** The four paid SKUs. Keys match PAYMENT_LINK_ENV in ~/lib/payment-links. */
 export type Sku =
   | "singleInsight"
   | "extendedReading"
@@ -47,8 +47,13 @@ export const SKUS: Record<Sku, SkuSpec> = {
   giftReading: { amountCents: 500, currency: "usd", credits: 1, kind: "gift" },
 };
 
+/**
+ * Own-property check, not `in`: `in` also walks the prototype chain, so keys
+ * like "toString", "constructor" or "__proto__" would pass and then fail the
+ * insert (credits = undefined) as a 503 instead of a clean 400.
+ */
 export function isSku(value: unknown): value is Sku {
-  return typeof value === "string" && value in SKUS;
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SKUS, value);
 }
 
 export type OrderStatus = "pending" | "paid" | "void";
@@ -89,6 +94,11 @@ export async function ensureSchema(): Promise<void> {
   await db`
     alter table orders
       add column if not exists amount_currency text not null default 'usd'`;
+  // SHA-256 of the per-order access token handed to the buyer at checkout
+  // (see ~/lib/order-access). Null for orders created before tokens existed.
+  await db`
+    alter table orders
+      add column if not exists access_token_hash text`;
   await db`
     create table if not exists readings (
       id          uuid primary key,
@@ -112,17 +122,20 @@ export async function ensureSchema(): Promise<void> {
 export async function createOrder(
   sku: Sku,
   gift?: { recipientEmail?: string; senderName?: string; note?: string },
+  access?: { accessTokenHash: string },
 ): Promise<string> {
   await ensureSchema();
   const spec = SKUS[sku];
   const id = crypto.randomUUID();
   await sql()`
     insert into orders (
-      id, sku, status, credits, amount_cents, amount_currency, recipient_email, sender_name, note
+      id, sku, status, credits, amount_cents, amount_currency, recipient_email, sender_name, note,
+      access_token_hash
     )
     values (
       ${id}, ${sku}, 'pending', ${spec.credits}, ${spec.amountCents}, ${spec.currency},
-      ${gift?.recipientEmail ?? null}, ${gift?.senderName ?? null}, ${gift?.note ?? null}
+      ${gift?.recipientEmail ?? null}, ${gift?.senderName ?? null}, ${gift?.note ?? null},
+      ${access?.accessTokenHash ?? null}
     )`;
   return id;
 }
@@ -297,7 +310,7 @@ export async function listReadings(
   });
 }
 
-function isUuid(value: string): boolean {
+export function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
     value,
   );
