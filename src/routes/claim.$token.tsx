@@ -18,6 +18,15 @@ import { shuffle } from "~/lib/random";
 import { singleCardLine } from "~/lib/synthesis";
 
 export const Route = createFileRoute("/claim/$token")({
+  // The token in this URL is the recipient's credential: never send it as a
+  // Referer to fonts or any other third party. (The response header is set
+  // in vercel-entry.ts / serve.ts; this covers any host that misses it.)
+  head: () => ({
+    meta: [
+      { name: "referrer", content: "no-referrer" },
+      { name: "robots", content: "noindex, nofollow" },
+    ],
+  }),
   component: ClaimPage,
 });
 

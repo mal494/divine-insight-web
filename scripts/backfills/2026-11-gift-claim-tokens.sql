@@ -2,7 +2,15 @@
 --
 -- NOT applied automatically and NOT a schema migration. Run by hand, once,
 -- against the target database only after the "never strand a paid gift" code
--- is deployed (see the PR description for the rollout order). It is safe to
+-- is deployed (see the PR description for the rollout order).
+--
+-- ORDERING vs. hashed tokens (PR #33): this mints PLAINTEXT tokens (the
+-- legacy format, still accepted by #33's lookup). Run it BEFORE #33's
+-- optional hashing backfill (scripts/backfills/2026-11-gift-claim-token-hashing.sql),
+-- so the rows it creates are hashed too. If #33 is already deployed, either
+-- run that hashing backfill again afterwards, or skip this script: the
+-- webhook mints hashed tokens for every new gift. Rows minted here are never
+-- emailed; support shares the link from the buyer's confirmation view. It is safe to
 -- run more than once: the unique index gift_claims_order_id_uidx plus
 -- `on conflict do nothing` and the `not exists` filter make it idempotent.
 --

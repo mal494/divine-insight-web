@@ -89,8 +89,9 @@ export async function getGiftDetails(orderId: string): Promise<GiftDetails | nul
  * recipient never gets two different links for one gift.
  *
  * `created` is true only for the call that actually inserted the row, which is
- * how callers send the recipient/buyer emails exactly once even when Stripe
- * retries or the buyer's confirmation view mints the token first.
+ * how the webhook sends the recipient/buyer emails exactly once even when
+ * Stripe retries or delivers two events concurrently. The webhook is the ONLY
+ * caller: nothing else may mint, or it would swallow those emails.
  */
 export async function createGiftClaim(
   orderId: string,
@@ -116,21 +117,29 @@ export async function createGiftClaim(
 }
 
 /**
- * The claim link for a PAID gift order, minting it if it is missing. This is
- * the self-healing path for gifts paid before the webhook always minted a
- * token (or whose mint failed): the buyer's confirmation view calls it, so a
- * paid gift always has a claim path. Returns null for unpaid / non-gift orders.
+ * The claim link for a PAID gift order, READ-ONLY. Only the Stripe webhook
+ * mints tokens, because the call that mints is the one that sends the
+ * recipient and buyer emails: if the buyer's poll could mint first, the
+ * webhook would see "already created" and skip both emails. A paid gift with
+ * no token yet (webhook still in flight, or retrying after a mint failure)
+ * returns token: null and the buyer view keeps polling. Gifts paid before the
+ * webhook always minted are healed by scripts/backfills/2026-11-gift-claim-tokens.sql.
+ * Returns null for unpaid / non-gift orders.
  */
-export async function ensureClaimForPaidGift(
+export async function getClaimForPaidGift(
   orderId: string,
-): Promise<{ token: string; created: boolean; gift: GiftDetails } | null> {
+): Promise<{ token: string | null; gift: GiftDetails } | null> {
   const gift = await getGiftDetails(orderId);
   if (!gift) return null;
-  const paid = await sql()`
-    select 1 from orders where id = ${orderId} and status = 'paid' limit 1`;
-  if (paid.length === 0) return null;
-  const claim = await createGiftClaim(orderId);
-  return { ...claim, gift };
+  const rows = await sql()`
+    select c.token
+      from orders o
+      left join gift_claims c on c.order_id = o.id
+     where o.id = ${orderId} and o.status = 'paid'
+     limit 1`;
+  const row = rows[0] as { token: string | null } | undefined;
+  if (!row) return null;
+  return { token: row.token ?? null, gift };
 }
 
 /** What the claim page may show before the recipient turns their card. */
@@ -179,27 +188,40 @@ export async function claimGift(
   await ensureGiftSchema();
   const db = sql();
 
-  const burned = await db`
-    update gift_claims
-       set claimed = true, claimed_at = now()
-     where token = ${token}
-       and claimed = false
-    returning order_id`;
-  if (burned.length === 0) {
+  // One statement, so it is atomic: burn the token, spend the credit and store
+  // the reading together, or not at all. The `claimed = false` condition is
+  // the lock — a second tab racing the first burns nothing and gets nothing.
+  const done = await db`
+    with burned as (
+      update gift_claims
+         set claimed = true, claimed_at = now()
+       where token = ${token}
+         and claimed = false
+      returning order_id
+    ),
+    spent as (
+      update orders o
+         set credits = greatest(o.credits - 1, 0)
+        from burned b
+       where o.id = b.order_id and o.status = 'paid'
+      returning o.id
+    ),
+    saved as (
+      insert into readings (id, order_id, payload)
+      select ${crypto.randomUUID()}, b.order_id, ${JSON.stringify(reading)}::jsonb
+        from burned b
+      returning id
+    )
+    select (select order_id from burned) as order_id,
+           (select id from saved) as reading_id`;
+  const row = done[0] as { order_id: string | null; reading_id: string | null } | undefined;
+  if (!row?.order_id) {
     const exists = await db`select 1 from gift_claims where token = ${token} limit 1`;
     return {
       ok: false,
       reason: exists.length > 0 ? "already_claimed" : "not_found",
     };
   }
-
-  const orderId = (burned[0] as { order_id: string }).order_id;
-  await db`
-    update orders set credits = greatest(credits - 1, 0)
-     where id = ${orderId} and status = 'paid'`;
-  await db`
-    insert into readings (id, order_id, payload)
-    values (${crypto.randomUUID()}, ${orderId}, ${JSON.stringify(reading)}::jsonb)`;
 
   return { ok: true };
 }

@@ -49,8 +49,10 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    there is an address) and sends the buyer a gift receipt carrying the same
    link ("Share this link with the person you're gifting").
    The buyer is also always shown the link on the gift confirmation view:
-   `/api/order/<id>` returns `claimUrl` for a paid gift, minting the token if
-   an older order never got one. Gifts with no recipient email are logged
+   `/api/order/<id>` returns `claimUrl` for a paid gift once the webhook has
+   minted it. That route is read-only and never mints: the webhook is the only
+   minter, so the emails go out exactly once (a poll that minted first would
+   make the webhook skip them). Gifts with no recipient email are logged
    (order id only, never the token) for support.
 3. The recipient opens the link, turns one card, and that POST burns the token,
    spends the credit, and stores the reading.
@@ -86,9 +88,20 @@ Without `RESEND_API_KEY` and `GIFT_FROM_EMAIL`, gift orders still complete and
 are still claimable - the emails just never go out, the failure is logged, and
 the buyer can still copy the link from the confirmation view.
 
-Paid gift orders created before every paid gift got a token can be backfilled
+Paid gift orders created before every paid gift got a token are backfilled
 with `scripts/backfills/2026-11-gift-claim-tokens.sql` (idempotent, run by
-hand; the buyer confirmation view also self-heals them on its next poll).
+hand). It mints the legacy plaintext token format, so run it BEFORE the
+hashed-token change and its hashing backfill, never after (see that script).
+
+Claim URLs are bearer credentials: `/claim/*` and `/api/claim/*` responses get
+`Referrer-Policy: no-referrer` (set in vercel-entry.ts / serve.ts, plus a meta
+tag on the page), the analytics loader never runs on a claim path, and no log
+line includes a token. Claiming is one atomic SQL statement (burn + credit +
+reading).
+
+Known gap (separate payments-hardening PR): buying straight from a Stripe
+Payment Link, bypassing `/api/checkout`, has no `client_reference_id`, so the
+webhook has no order or recipient to attach it to.
 Set both before selling gifts.
 
 **A webhook endpoint in Stripe**

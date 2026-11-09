@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getOrder: vi.fn(),
   listReadings: vi.fn(),
-  ensureClaimForPaidGift: vi.fn(),
+  getClaimForPaidGift: vi.fn(),
 }));
 
 vi.mock("~/lib/orders", () => ({
@@ -13,7 +13,7 @@ vi.mock("~/lib/orders", () => ({
   listReadings: mocks.listReadings,
 }));
 vi.mock("~/lib/gifts", () => ({
-  ensureClaimForPaidGift: mocks.ensureClaimForPaidGift,
+  getClaimForPaidGift: mocks.getClaimForPaidGift,
 }));
 
 import { ClaimLinkPanel } from "~/components/gift-reading";
@@ -34,11 +34,10 @@ describe("buyer's view of a paid gift", () => {
     delete process.env.PUBLIC_SITE_URL;
   });
 
-  test("a paid gift with no recipient email returns the claim link (minting it if missing)", async () => {
+  test("a paid gift with no recipient email returns the claim link", async () => {
     mocks.getOrder.mockResolvedValue(giftOrder("paid"));
-    mocks.ensureClaimForPaidGift.mockResolvedValue({
+    mocks.getClaimForPaidGift.mockResolvedValue({
       token: "a".repeat(32),
-      created: true,
       gift: { orderId: ORDER_ID, recipientEmail: null, senderName: null, note: null },
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -58,9 +57,8 @@ describe("buyer's view of a paid gift", () => {
 
   test("a paid gift WITH a recipient email also shows the buyer the link", async () => {
     mocks.getOrder.mockResolvedValue(giftOrder("paid", 0));
-    mocks.ensureClaimForPaidGift.mockResolvedValue({
+    mocks.getClaimForPaidGift.mockResolvedValue({
       token: "b".repeat(32),
-      created: false,
       gift: { orderId: ORDER_ID, recipientEmail: "r@example.com", senderName: null, note: null },
     });
     const body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
@@ -71,16 +69,26 @@ describe("buyer's view of a paid gift", () => {
     mocks.getOrder.mockResolvedValue(giftOrder("pending"));
     let body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body.claimUrl).toBeUndefined();
-    expect(mocks.ensureClaimForPaidGift).not.toHaveBeenCalled();
+    expect(mocks.getClaimForPaidGift).not.toHaveBeenCalled();
 
     mocks.getOrder.mockResolvedValue({ ...giftOrder("paid"), sku: "singleInsight", kind: "single" });
     body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
     expect(body).toEqual({ status: "paid", kind: "single", credits: 1 });
   });
 
+  test("a paid gift the webhook has not minted yet has no link (and nothing is minted)", async () => {
+    mocks.getOrder.mockResolvedValue(giftOrder("paid"));
+    mocks.getClaimForPaidGift.mockResolvedValue({
+      token: null,
+      gift: { orderId: ORDER_ID, recipientEmail: null, senderName: null, note: null },
+    });
+    const body = (await (await handleOrder(ORDER_ID, req())).json()) as Record<string, unknown>;
+    expect(body).toEqual({ status: "paid", kind: "gift", credits: 1 });
+  });
+
   test("a claim lookup failure still answers the order status", async () => {
     mocks.getOrder.mockResolvedValue(giftOrder("paid"));
-    mocks.ensureClaimForPaidGift.mockRejectedValue(new Error("db blip"));
+    mocks.getClaimForPaidGift.mockRejectedValue(new Error("db blip"));
     vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await handleOrder(ORDER_ID, req());
     expect(res.status).toBe(200);
