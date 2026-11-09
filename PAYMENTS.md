@@ -78,29 +78,67 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    - **Recovering emails that gave up** (e.g. after fixing a wrong
      `RESEND_API_KEY`, an unverified domain, or after an outage). This is a
      production write, so get the owner's OK first:
-     1. Fix the configuration (env vars, then redeploy) and confirm with one
-        test gift in preview or a single real order.
-     2. List the affected orders (query above) and reset only those rows,
-        leaving anything already sent alone:
+     1. Fix the configuration (env vars, then **redeploy**: Vercel env changes
+        only reach a new deployment). Confirm it with **one real gift order,
+        placed only with Michael's OK**. Do not use a preview test: previews
+        share the production database, so a "test" gift there is a real row.
+     2. List the affected orders and count them per kind (read-only):
         ```sql
-        update gift_claims
-           set recipient_email_failed_at = null, recipient_email_attempts = 0,
-               recipient_email_lease_until = null
-         where order_id = any($1) and recipient_emailed_at is null;
-        update gift_claims
-           set buyer_email_failed_at = null, buyer_email_attempts = 0,
-               buyer_email_lease_until = null
-         where order_id = any($1) and buyer_emailed_at is null;
+        select order_id,
+               recipient_email_failed_at is not null and recipient_emailed_at is null as recipient_stuck,
+               buyer_email_failed_at     is not null and buyer_emailed_at     is null as buyer_stuck
+          from gift_claims
+         where (recipient_email_failed_at is not null and recipient_emailed_at is null)
+            or (buyer_email_failed_at     is not null and buyer_emailed_at     is null);
         ```
-     3. Re-run delivery by resending each order's `checkout.session.completed`
+        Note the order ids and the two counts.
+     3. Reset exactly those rows, in one transaction with an explicit `uuid[]`
+        and a row-count check. If either count differs, the DO block raises and
+        the whole transaction rolls back (run with `psql -v ON_ERROR_STOP=1`):
+        ```sql
+        \set ON_ERROR_STOP on
+        BEGIN;
+        DO $$
+        DECLARE
+          -- paste the ids from step 2; nothing else to edit except the counts
+          ids uuid[] := '{11111111-1111-4111-8111-111111111111}'::uuid[];
+          expected_recipient int := 1;   -- recipient_stuck count from step 2
+          expected_buyer     int := 0;   -- buyer_stuck count from step 2
+          n int;
+        BEGIN
+          UPDATE gift_claims
+             SET recipient_email_failed_at = NULL, recipient_email_attempts = 0,
+                 recipient_email_lease_until = NULL
+           WHERE order_id = ANY (ids)
+             AND recipient_emailed_at IS NULL
+             AND recipient_email_failed_at IS NOT NULL;
+          GET DIAGNOSTICS n = ROW_COUNT;
+          IF n <> expected_recipient THEN
+            RAISE EXCEPTION 'recipient reset: expected % rows, got %', expected_recipient, n;
+          END IF;
+          UPDATE gift_claims
+             SET buyer_email_failed_at = NULL, buyer_email_attempts = 0,
+                 buyer_email_lease_until = NULL
+           WHERE order_id = ANY (ids)
+             AND buyer_emailed_at IS NULL
+             AND buyer_email_failed_at IS NOT NULL;
+          GET DIAGNOSTICS n = ROW_COUNT;
+          IF n <> expected_buyer THEN
+            RAISE EXCEPTION 'buyer reset: expected % rows, got %', expected_buyer, n;
+          END IF;
+        END $$;
+        COMMIT;
+        ```
+     4. Re-run delivery by resending each order's `checkout.session.completed`
         event from Stripe (Dashboard → Developers → Events → Resend, events up
         to 15 days old; `stripe events resend <evt_id>` up to 30 days). The
         webhook sees the order as already paid and only sends the missing
-        emails. Each resend counts against the age cap from `paid_at`, so
-        raise `GIFT_EMAIL_GIVE_UP_HOURS` (max 72) for the re-run if the orders
-        are older than the cap. Otherwise the first failure gives up again
-        (a successful send is unaffected).
-     4. Check `*_emailed_at` is now set for those rows. Orders past Stripe's
+        emails. Each resend counts against the age cap from `paid_at`, so for
+        orders older than the cap raise `GIFT_EMAIL_GIVE_UP_HOURS` (max 72)
+        first. That is an env change and **needs a redeploy** before the
+        resends, and another one to put it back afterwards. Otherwise the first
+        failure gives up again (a successful send is unaffected).
+     5. Check `*_emailed_at` is now set for those rows. Orders past Stripe's
         resend window need a hand-sent email with the claim link from the
         buyer's confirmation view (see the make-whole plan).
    - Each Resend call has a 12 s timeout (AbortController); a timeout counts as
