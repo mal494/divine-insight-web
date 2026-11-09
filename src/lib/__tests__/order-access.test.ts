@@ -15,7 +15,6 @@ vi.mock("~/db", () => ({
       if (q.startsWith("create") || q.startsWith("alter")) {
         throw new Error(`order access must never run DDL: ${q}`);
       }
-      if (q.startsWith("create") || q.startsWith("alter")) return [];
       if (q.startsWith("select access_token_hash from orders where id =")) {
         const id = String(values[0]);
         return db.hashes.has(id)
@@ -113,35 +112,47 @@ describe("schema not migrated", () => {
 
 describe("LEGACY_ORDER_ACCESS_UNTIL (legacy sunset)", () => {
   const now = new Date("2027-01-01T00:00:00Z");
+  const open = (v: string) =>
+    legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: v }, now);
 
   test("unset or blank keeps legacy id-only access open", () => {
     expect(legacyAccessOpen({}, now)).toBe(true);
-    expect(legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "  " }, now)).toBe(
-      true,
-    );
+    expect(open("  ")).toBe(true);
   });
 
-  test("open before the cutoff, closed at and after it", () => {
-    expect(
-      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "2027-02-01" }, now),
-    ).toBe(true);
-    expect(
-      legacyAccessOpen(
-        { LEGACY_ORDER_ACCESS_UNTIL: "2027-01-01T00:00:00Z" },
-        now,
-      ),
-    ).toBe(false);
-    expect(
-      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "2026-12-01" }, now),
-    ).toBe(false);
+  test("strict ISO 8601 with a zone: open before the cutoff, closed at and after it", () => {
+    expect(open("2027-02-01T00:00:00Z")).toBe(true);
+    expect(open("2027-01-01T00:00:01Z")).toBe(true);
+    expect(open("2027-01-01T00:00:00Z")).toBe(false);
+    expect(open("2026-12-01T00:00Z")).toBe(false);
+    expect(open("2027-01-01T00:00:00.500Z")).toBe(true);
+    // 2026-12-31T20:00-05:00 is 2027-01-01T01:00Z → still open
+    expect(open("2026-12-31T20:00:00-05:00")).toBe(true);
+    expect(open("2026-12-31T18:00:00-05:00")).toBe(false);
+    expect(open("2027-01-01T01:00:00+02:00")).toBe(false);
   });
 
-  test("an unparseable value fails closed", () => {
-    vi.spyOn(console, "error").mockImplementation(() => {});
-    expect(
-      legacyAccessOpen({ LEGACY_ORDER_ACCESS_UNTIL: "next spring" }, now),
-    ).toBe(false);
-  });
+  test.each([
+    "2027-02-01",
+    "2027-02-01T00:00:00",
+    "2027-02-01 00:00:00Z",
+    "2027-02-01T00:00:00+0200",
+    "2027-02-01T00:00:00z",
+    "2027-13-01T00:00:00Z",
+    "2027-02-31T00:00:00Z",
+    "2027-02-01T25:00:00Z",
+    "Feb 1 2027 00:00 GMT",
+    "1798761600000",
+    "next spring",
+  ])(
+    "%j is not strict ISO 8601 with a zone: fails closed with a warning",
+    (v) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      expect(open(v)).toBe(false);
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+    },
+  );
 
   test("closed legacy access denies pre-token orders but not token holders", async () => {
     db.hashes.clear();
@@ -149,7 +160,7 @@ describe("LEGACY_ORDER_ACCESS_UNTIL (legacy sunset)", () => {
     const t = newOrderAccessToken();
     db.hashes.set(ORDER, t.hash);
     db.hashes.set(LEGACY, null);
-    const closed = { LEGACY_ORDER_ACCESS_UNTIL: "2000-01-01" };
+    const closed = { LEGACY_ORDER_ACCESS_UNTIL: "2000-01-01T00:00:00Z" };
     expect(await checkOrderAccess(LEGACY, null, closed)).toBe("denied");
     expect(await checkOrderAccess(ORDER, t.token, closed)).toBe("granted");
     expect(decideOrderAccess(null, null, false)).toBe("denied");

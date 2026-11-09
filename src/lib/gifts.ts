@@ -6,10 +6,10 @@
  * own. The token in that link is the recipient's only credential, so it is
  * random, single-use, and never guessable from the order id.
  *
- * Server-only. Lives beside orders.ts and shares its schema bootstrap.
+ * Server-only. Lives beside orders.ts; gift_claims comes from
+ * migrations/0004_payments_schema.sql (no runtime DDL).
  */
 import { sql } from "~/db";
-import { ensureSchema } from "~/lib/orders";
 
 export type GiftDetails = {
   orderId: string;
@@ -26,40 +26,8 @@ export type ClaimView = {
   reading: unknown | null;
 };
 
-async function ensureGiftSchema(): Promise<void> {
-  await ensureSchema();
-  await sql()`
-    create table if not exists gift_claims (
-      token       text primary key,
-      order_id    uuid not null references orders(id) on delete cascade,
-      claimed     boolean not null default false,
-      claimed_at  timestamptz,
-      created_at  timestamptz not null default now()
-    )`;
-  // Migration: old builds could create more than one token per order under
-  // races. Keep one row per order before adding the unique index.
-  await sql()`
-    with ranked as (
-      select
-        token,
-        row_number() over (
-          partition by order_id
-          order by claimed desc, claimed_at desc nulls last, created_at asc, token asc
-        ) as rn
-      from gift_claims
-    )
-    delete from gift_claims g
-     using ranked r
-     where g.token = r.token
-       and r.rn > 1`;
-  await sql()`
-    create unique index if not exists gift_claims_order_id_uidx
-      on gift_claims (order_id)`;
-}
-
 /** Read the gift fields captured at checkout. Null when it is not a gift order. */
 export async function getGiftDetails(orderId: string): Promise<GiftDetails | null> {
-  await ensureGiftSchema();
   const rows = await sql()`
     select id, recipient_email, sender_name, note
       from orders
@@ -88,7 +56,6 @@ export async function getGiftDetails(orderId: string): Promise<GiftDetails | nul
  * recipient never gets two different links for one gift.
  */
 export async function createGiftClaim(orderId: string): Promise<string> {
-  await ensureGiftSchema();
   const db = sql();
 
   const token = randomToken();
@@ -109,7 +76,6 @@ export async function createGiftClaim(orderId: string): Promise<string> {
 /** What the claim page may show before the recipient turns their card. */
 export async function getClaim(token: string): Promise<ClaimView | null> {
   if (!isToken(token)) return null;
-  await ensureGiftSchema();
   const rows = await sql()`
     select o.sender_name, o.note, c.claimed, c.order_id
       from gift_claims c
@@ -149,7 +115,6 @@ export async function claimGift(
   reading: unknown,
 ): Promise<{ ok: true } | { ok: false; reason: "not_found" | "already_claimed" }> {
   if (!isToken(token)) return { ok: false, reason: "not_found" };
-  await ensureGiftSchema();
   const db = sql();
 
   const burned = await db`

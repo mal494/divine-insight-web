@@ -21,9 +21,9 @@
  */
 import { createFileRoute } from "@tanstack/react-router";
 import {
-  ORDER_ACCESS_MIGRATION,
   isMissingSchemaError,
   newOrderAccessToken,
+  schemaNotMigratedResponse,
 } from "~/lib/order-access";
 import { createOrder, isSku } from "~/lib/orders";
 import {
@@ -86,11 +86,9 @@ export async function handleCheckout(
     // A missing DATABASE_URL lands here. Fail loudly rather than falling
     // back to an ungated draw — the whole point of this route is that an
     // unverified purchase never unlocks anything.
-    if (isMissingSchemaError(err)) {
-      console.error(`checkout unavailable: apply ${ORDER_ACCESS_MIGRATION}`, err);
-    } else {
-      console.error("checkout failed", err);
-    }
+    if (isMissingSchemaError(err))
+      return schemaNotMigratedResponse("POST /api/checkout", err);
+    console.error("checkout failed", err);
     return json({ error: "checkout_unavailable" }, 503);
   }
 }
