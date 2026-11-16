@@ -2,8 +2,8 @@
 
 Divine Insight Web is a [TanStack Start](https://tanstack.com/start) app
 (React + Vite + Tailwind), served on **port 3000**. Product layout and commands
-are in `README.md`. Card-data rules are in `CORE.md`. One-time payments and the
-Pro subscription scaffold are in `PAYMENTS.md`.
+are in `README.md`. Card-data rules are in `CORE.md`. One-time payments, Pro
+Checkout, and the dev-only Pro gate are in `PAYMENTS.md`.
 
 The headline and readings are the app in `src/routes/index.tsx`. `site.json`
 still supplies `businessName` where a route reads it. This file is only the
@@ -33,8 +33,9 @@ in `.run/`.
 
 ## Making it dynamic
 
-API routes already live under `src/routes/api/` (checkout, the Stripe webhook,
-order lookup, reading storage). Adding another behavior is one file on the same
+API routes already live under `src/routes/api/` (one-time checkout, both Stripe
+webhooks, order lookup, reading storage, the Gemini proxy, auth, and Pro
+checkout/portal). Adding another behavior is one file on the same
 port 3000 — no second process:
 
 - **Server function** — call server-only code (DB, secrets, fetch) directly from a

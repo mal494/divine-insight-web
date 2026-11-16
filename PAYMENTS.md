@@ -24,8 +24,9 @@ scrolled past the CTA.
 3. Visitor pays. Stripe POSTs either `checkout.session.completed` (most
    methods) or `checkout.session.async_payment_succeeded` (delayed methods) to
    `/api/stripe-webhook` with that `client_reference_id`.
-4. The webhook verifies the signature, checks `amount_total` against the SKU's
-   price, and flips the order to `paid`.
+4. The webhook verifies the signature, checks `amount_total` and the currency
+   against the amount and currency stored on that order at checkout (not
+   against today's `SKUS` entry), and flips the order to `paid`.
 5. The section has been polling `/api/order/<id>`; it sees `paid` and unlocks
    the draw.
 6. When the cards are down, the page POSTs the reading to `/api/reading`, which
@@ -111,27 +112,29 @@ must show the expired-link page.
 
 `bun run test` covers the fulfilment decisions without Stripe or Postgres. See the table in `README.md`. The cases that matter here:
 
-- `markPaid` is idempotent on `stripe_events`. A second delivery of the same event id does not overwrite the stored payment intent.
-- A charged amount that disagrees with `SKUS[sku].amountCents` returns `amount-mismatch` and leaves the order `pending`.
+- `markPaid` is idempotent on `stripe_events`. A second delivery of the same event id does not overwrite the stored payment intent. A new event id for an order that is already `paid` returns `already-paid`.
+- A charged amount that disagrees with the order row's captured `amountCents` returns `amount-mismatch` and leaves the order `pending`. A currency that disagrees returns `currency-mismatch`. Editing `SKUS` after the order exists does not change that comparison.
 - `verifyStripeSignature` rejects timestamps more than 300 seconds from `now`, and accepts any `v1` candidate that matches during secret rotation.
 
 These tests mock `~/db`. They do not boot the dev server or hit `/api/stripe-webhook`.
 
 ## Database
 
-Four tables, created on first use (this template has no migration runner, so
-the schema bootstraps itself):
+Four one-time tables, created on first use (`ensureSchema` / `ensureGiftSchema`).
+Pro accounts do not use this path; apply `migrations/0001_pro_auth.sql` and
+`migrations/0002_pro_subscriptions.sql` by hand.
 
-- `orders` - one row per checkout attempt, with status and remaining credits
+- `orders` - one row per checkout attempt, with status, captured price, and remaining credits
 - `readings` - every stored reading, keyed to its order (this is the journal)
-- `stripe_events` - applied webhook event ids, so a Stripe retry is a no-op
-- `gift_claims` - single-use claim tokens for Gift Readings
+- `stripe_events` - applied one-time webhook event ids, so a Stripe retry is a no-op
+- `gift_claims` - one claim token per gift order (32 hex characters, 128 bits). The token is the primary key and is stored as issued. A second insert for the same order keeps the first token
 
 ## Divine Insight Pro
 
-Pro is a separate $5/month subscription **scaffold**. It is not a key in
-`SKUS`, and `/api/stripe-webhook` does not grant it. The one-time ladder above
-is unchanged.
+Pro is not a key in `SKUS`, and `/api/stripe-webhook` does not grant it. The
+one-time ladder above is unchanged. Subscription state lives in
+`entitlements`, written only by `/api/stripe-subscription-webhook`. The pages
+do not read that table. A paid subscription does not flip the UI.
 
 ### What the UI gates
 
@@ -163,19 +166,53 @@ from `src/routes/__root.tsx`.
 - `PremiumDevToggle` renders only in dev (bottom-right **Pro: On / Off**).
   Checkout does not call `setIsPremium`.
 
-Setting the localStorage key in a production build does nothing. Pro is not
-access control and it is not for sale on the site.
+Setting the localStorage key in a production build does nothing. The flag is
+only a dev preview. The home page has no upgrade button.
 
-### Checkout scaffold
+### Server subscription
 
-`src/lib/stripe-checkout.ts` still exports `redirectToProCheckout`, which loads
-Stripe.js with the placeholder key `pk_test_placeholder_divine_insight_pro`,
-logs `price_placeholder_divine_insight_pro_monthly`, and alerts instead of
-creating a Checkout Session. Nothing in the UI calls it. Do not create
-Sessions with the publishable key alone.
+`POST /api/pro/checkout` and `POST /api/pro/portal` require a session.
+`userFromRequest` returns null when `DATABASE_URL` or `BETTER_AUTH_SECRET` is
+unset, and both routes then answer 401 `sign_in_required`.
 
-A real Pro subscription needs its own server check. The existing webhook only
-fulfils rows in `SKUS`.
+Checkout (`src/lib/billing/pro.ts`) creates a Stripe Checkout Session in
+`subscription` mode with `STRIPE_SECRET_KEY` and `STRIPE_PRO_PRICE_ID`.
+`client_reference_id` and the subscription metadata are the user id. Success
+lands on `/?pro=activating` and cancel on `/?pro=canceled`, using
+`BETTER_AUTH_URL` when it is set and the request origin otherwise. A missing
+price id, a missing secret key, or any other thrown error becomes 503
+`checkout_unavailable`.
+
+The portal answers 404 `no_subscription` when that user has no
+`stripe_customer_id` on an entitlements row. A missing secret key or a Stripe
+error becomes 503 `portal_unavailable`.
+
+`POST /api/stripe-subscription-webhook` uses `STRIPE_PRO_WEBHOOK_SECRET`
+(a different endpoint and secret from `/api/stripe-webhook`). It handles:
+
+- `checkout.session.completed` only when `mode` is `subscription` (a payment-mode session is ignored)
+- `customer.subscription.created`, `updated`, and `deleted`
+- `invoice.paid` and `invoice.payment_failed`
+
+Each event id is inserted into `stripe_subscription_events` first. A repeat
+returns 200 `duplicate`. The handler then re-fetches the subscription from
+Stripe and upserts `entitlements` only when the price id equals
+`STRIPE_PRO_PRICE_ID`. Any other price is `wrong-price` and is not written.
+No user id on the subscription, and no existing row for that customer, is
+`no-user`. On `customer.subscription.deleted`, a failed fetch falls back to
+the event payload with status `canceled`. If processing throws, the claim row
+is deleted and the response is 500 so Stripe retries. A missing signing
+secret is 500 and writes nothing.
+
+`hasPro` treats `active`, `trialing`, and `past_due` as entitled when
+`current_period_end` is null or still in the future. Apply `migrations/0002_pro_subscriptions.sql` after
+`0001` before relying on the Stripe columns. `go-live.sh` does not forward
+`STRIPE_SECRET_KEY`, `STRIPE_PRO_PRICE_ID`, or `STRIPE_PRO_WEBHOOK_SECRET`.
+
+`src/lib/stripe-checkout.ts` exports `redirectToProCheckout` and
+`redirectToBillingPortal`. They POST the routes above and follow the returned
+URL; a 401 sends the browser to `/signin`. No component imports them, and
+`SubscriptionContext` does not read `?pro=activating`.
 
 ### Trying the gate locally
 
@@ -197,16 +234,7 @@ builds only. A production build has no toggle and no upgrade button.
   are still only `GET /api/order/<id>?include=readings`.
 - Tips stay honor-based on purpose. A tip unlocks nothing, so there is nothing
   to verify.
-- Pro is hidden in production and is not sold. The dev toggle is the only way
-  to preview it. It does not write `orders`.
-
-## Pro subscription (P3)
-
-Server-created Stripe Checkout (subscription mode) via `POST /api/pro/checkout`
-and Customer Portal via `POST /api/pro/portal` (both require a signed-in user).
-Entitlements are written only by `POST /api/stripe-subscription-webhook`
-(own signing secret, `STRIPE_PRO_WEBHOOK_SECRET`), which handles
-`checkout.session.completed` (mode=subscription), `customer.subscription.created|updated|deleted`,
-`invoice.paid` and `invoice.payment_failed`, dedupes by event id, and re-fetches the
-subscription from Stripe. Apply `migrations/0002_pro_subscriptions.sql` first.
-One-time orders and `/api/stripe-webhook` are unchanged.
+- The dev toggle is the only way the pages show Pro. Checkout and the
+  entitlement row exist on the server, and no page calls `hasPro` or
+  `redirectToProCheckout`. The toggle does not write `orders` or
+  `entitlements`.
