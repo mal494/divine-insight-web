@@ -13,10 +13,17 @@
  */
 import { useEffect } from "react";
 import { ANALYTICS, analyticsConfigured } from "~/lib/analytics";
+import { isClaimPath } from "~/lib/claim-privacy";
+
+/** Never load analytics on a gift claim page: the URL is a bearer token. */
+export function shouldLoadAnalytics(pathname: string, configured: boolean): boolean {
+  return configured && !isClaimPath(pathname);
+}
 
 export function Analytics() {
   useEffect(() => {
-    if (typeof window === "undefined" || !analyticsConfigured()) return;
+    if (typeof window === "undefined") return;
+    if (!shouldLoadAnalytics(window.location.pathname, analyticsConfigured())) return;
 
     const script = document.createElement("script");
     script.src = ANALYTICS.scriptUrl;

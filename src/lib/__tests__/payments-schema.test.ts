@@ -17,7 +17,11 @@ vi.mock("~/db", () => ({
   },
 }));
 
-import { REQUIRED_PAYMENTS_SCHEMA, missingSchema } from "~/lib/payments-schema";
+import {
+  PAYMENTS_SCHEMA_REQUIREMENTS,
+  REQUIRED_PAYMENTS_SCHEMA,
+  missingSchema,
+} from "~/lib/payments-schema";
 import {
   FAIL_TTL_MS,
   OK_TTL_MS,
@@ -26,8 +30,10 @@ import {
 } from "~/routes/api/health/payments";
 
 const full = () =>
-  Object.entries(REQUIRED_PAYMENTS_SCHEMA).flatMap(([table_name, cols]) =>
-    cols.map((column_name) => ({ table_name, column_name })),
+  PAYMENTS_SCHEMA_REQUIREMENTS.flatMap((req) =>
+    Object.entries(req.schema).flatMap(([table_name, cols]) =>
+      cols.map((column_name) => ({ table_name, column_name })),
+    ),
   );
 
 beforeEach(() => {
@@ -40,7 +46,7 @@ beforeEach(() => {
 
 describe("payments schema readiness", () => {
   test("missingSchema lists absent tables and columns", () => {
-    expect(missingSchema(full())).toEqual([]);
+    expect(missingSchema(full(), REQUIRED_PAYMENTS_SCHEMA)).toEqual([]);
     const noToken = full().filter(
       (r) =>
         !(r.table_name === "orders" && r.column_name === "access_token_hash"),
@@ -71,6 +77,34 @@ describe("payments schema readiness", () => {
       migrations: ["migrations/0004_payments_schema.sql"],
       missing: ["orphan_payments"],
     });
+  });
+});
+
+describe("#32: 0005 gift email columns", () => {
+  test("missing 0005 columns → 503 naming 0005 (and not 0004)", async () => {
+    m.rows = full().filter(
+      (r) => !(r.table_name === "gift_claims" && /_email(ed_at|_lease_until)$/.test(r.column_name)),
+    );
+    const res = await handlePaymentsHealth();
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.migrations).toEqual(["migrations/0005_gift_claim_email_flags.sql"]);
+    expect(body.missing).toEqual([
+      "gift_claims.recipient_emailed_at",
+      "gift_claims.buyer_emailed_at",
+      "gift_claims.recipient_email_lease_until",
+      "gift_claims.buyer_email_lease_until",
+    ]);
+  });
+
+  test("nothing migrated → both migrations, in apply order, gift_claims listed once", async () => {
+    m.rows = [];
+    const body = await (await handlePaymentsHealth()).json();
+    expect(body.migrations).toEqual([
+      "migrations/0004_payments_schema.sql",
+      "migrations/0005_gift_claim_email_flags.sql",
+    ]);
+    expect(body.missing.filter((x: string) => x === "gift_claims")).toHaveLength(1);
   });
 });
 

@@ -9,6 +9,7 @@
 // with an already-running server. Every sandbox user has passwordless sudo, so
 // the takeover works across user boundaries.
 import handler from "./dist/server/server.js";
+import { claimPrivacyHeaders } from "./src/lib/claim-privacy";
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -45,7 +46,15 @@ for (let attempt = 1; ; attempt++) {
           const file = Bun.file(CLIENT_DIR + pathname);
           if (await file.exists()) return new Response(file);
         }
-        return (handler as { fetch: (r: Request) => Response | Promise<Response> }).fetch(req);
+        const res = await (
+          handler as { fetch: (r: Request) => Response | Promise<Response> }
+        ).fetch(req);
+        // Gift claim URLs carry a bearer token: never leak them via Referer.
+        const extra = Object.entries(claimPrivacyHeaders(pathname));
+        if (extra.length === 0) return res;
+        const headers = new Headers(res.headers);
+        for (const [key, value] of extra) headers.set(key, value);
+        return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
       },
     });
     break;
