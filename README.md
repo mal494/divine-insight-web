@@ -8,9 +8,11 @@ Card data comes from [Divine Insight Core](https://github.com/mal494/divine-insi
 — this repo never edits card copy directly. See `CORE.md` for the pinned-version
 rules.
 
-Paid one-time readings and the Divine Insight Pro subscription scaffold are
-different systems. Production hides Pro and ignores the dev `localStorage`
-flag. See `PAYMENTS.md` before changing a gate, a price, or a Stripe call.
+Paid one-time readings and Divine Insight Pro are different systems. One-time
+orders are fulfilled only by `/api/stripe-webhook`. Pro sign-in, Checkout, and
+the `entitlements` row are server-side; the pages still gate Pro with a
+dev-only flag and do not read that row. See `PAYMENTS.md` before changing a
+gate, a price, or a Stripe call.
 
 ## Prerequisites
 
@@ -45,13 +47,17 @@ bun run dev          # dev server on http://localhost:3000
 
 `bun run typecheck` runs `tsr generate` and then `tsc --noEmit -p tsconfig.typecheck.json`. That project includes `src/**/*.ts` and `src/**/*.tsx` except `src/routes/api/**/*.ts`, so a green type-check does not cover the API route files. `bunx tsc --noEmit` is not the CI command: it skips route-tree generation and uses the default project.
 
-`bun run test` runs Vitest once over `src/lib/__tests__/`:
+`bun run test` runs Vitest once. There is no `vitest.config`, so Vitest's default include applies: every `*.test.ts` under the repo, including `src/lib/__tests__/`, `src/lib/auth/__tests__/`, and `src/lib/billing/__tests__/`.
 
 | File | What it locks |
 | --- | --- |
 | `entitlement.test.ts` | `resolveEntitlementFromOrders`: a paid order with credits wins over a spent paid order (`unlocked`); only spent paid orders are `spent`; a pending order is `awaiting-payment`; any other status is `locked` |
-| `orders.test.ts` | `markPaid`: a repeated Stripe event id returns `duplicate` and keeps the first payment intent and session; a charged amount that is not the SKU price returns `amount-mismatch` and leaves the order `pending`; an order id this server never created returns `unknown-order` |
+| `orders.test.ts` | `markPaid` compares the charged amount and currency with the order row captured at checkout, not with the live `SKUS` table. A repeated event id is `duplicate`. An order id this server never created is `unknown-order`. A new event for an order that is already paid is `already-paid` |
 | `stripe-signature.test.ts` | `verifyStripeSignature`: a valid `v1` signature, any matching `v1` candidate while a secret is rotating, a timestamp more than 300 seconds off (`timestamp`), a bad signature (`mismatch`), and a header with no `t=` (`malformed`) |
+| `stripe-webhook-route.test.ts` | The one-time webhook accepts `checkout.session.completed` and `checkout.session.async_payment_succeeded` only when `payment_status` is `paid` and both amount and currency are present |
+| `gemini-proxy-route.test.ts`, `gemini-proxy-security.test.ts` | App-token auth, production fail-closed when Redis is missing, the in-memory limiter outside production, and `UPSTASH_REDIS_REST_*` preferred over `KV_REST_API_*` |
+| `auth-config.test.ts`, `confirm.test.ts`, `has-pro.test.ts` | Magic-link options (15-minute hashed tokens), confirm POST (GET does not verify the token), and which entitlement statuses count as Pro |
+| `pro-billing.test.ts`, `subscription-webhook.test.ts` | Checkout session shape, a non-Pro price left unsynced, portal with no customer, webhook signature, duplicate events, and releasing the event claim when processing throws |
 
 `.github/workflows/ci.yml` runs on pull requests and on pushes to `main`. The job uses Node 22, `npm ci` (so `package-lock.json` is the CI lockfile; `bun.lock` is not), then `npm run typecheck`, `npm run test`, and `npm run build`. The `ci` script in `package.json` calls `npm run` for those three steps, so it needs npm on `PATH` even when you start it with Bun.
 
@@ -98,16 +104,24 @@ None are required to build or run the dev server. These matter at deploy time:
 | `GEMINI_PROXY_RATE_LIMIT_MAX` | Gemini proxy limiter | Max requests per window (default `20`) |
 | `GEMINI_PROXY_RATE_LIMIT_WINDOW_MS` | Gemini proxy limiter | Window size in ms (default `60000`) |
 | `GEMINI_PROXY_RATE_LIMIT_PREFIX` | Gemini proxy limiter | Optional Redis key namespace (`gemini-proxy:v1` default) |
+| `STRIPE_SECRET_KEY` | `POST /api/pro/checkout`, `POST /api/pro/portal` | Server-only Stripe secret. A missing key surfaces as 503 `checkout_unavailable` or `portal_unavailable` |
+| `STRIPE_PRO_PRICE_ID` | Pro Checkout | Recurring price id. `syncSubscription` leaves any other price unsynced (`wrong-price`) |
+| `STRIPE_PRO_WEBHOOK_SECRET` | `/api/stripe-subscription-webhook` | Separate from `STRIPE_WEBHOOK_SECRET`. Missing secret: HTTP 500 and no entitlement write |
+| `BETTER_AUTH_SECRET` | magic-link sessions | Signing secret (`.env.example` asks for at least 32 characters). Session lookup returns null when this or `DATABASE_URL` is unset |
+| `BETTER_AUTH_URL` | auth and Pro return URLs | Optional canonical origin. Checkout success, cancel, and the portal return URL use it when set, otherwise the request origin |
 | `VERCEL_SCOPE` / `VERCEL_TEAM_ID` / `VERCEL_PROJECT_NAME` | optional | Overrides for `go-live.sh` team/project resolution |
 
 `go-live.sh` fails fast when `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
 `GIFT_FROM_EMAIL` is missing, and passes them to Vercel with `-e` so a deploy
 cannot silently go out without payment/gift-email configuration. `DATABASE_URL`
-is forwarded the same way when it is set. A local `.env` is not read by the
-deploy; export the variables in the shell that runs `bun run go-live`.
+is forwarded the same way when it is set, and `PUBLIC_SITE_URL` when it is set.
+A local `.env` is not read by the deploy; export the variables in the shell
+that runs `bun run go-live`.
 
-Pro does not read an env var. Its publishable key and price id are the
-placeholder constants in `src/lib/stripe-checkout.ts`.
+That script does not forward `STRIPE_SECRET_KEY`, `STRIPE_PRO_PRICE_ID`,
+`STRIPE_PRO_WEBHOOK_SECRET`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, or the
+Gemini variables. Set those in the Vercel project. A go-live deploy will not
+add them, and Pro Checkout or sign-in will fail closed at runtime without them.
 
 Create a local `.env` (gitignored) if you need any of these during development:
 
@@ -117,23 +131,41 @@ cp .env.example .env   # if present; otherwise create .env manually
 
 ## Accounts (magic link sign-in)
 
-Better Auth with email magic links only (no passwords). Users, sessions, hashed
-15-minute tokens and the rate limiter live in Neon Postgres (`pg` Pool on the
-pooled `DATABASE_URL`, `attachDatabasePool`). Emails link to `/auth/confirm`, a
-page with a single button that POSTs to `/api/auth-confirm`, so link scanners
-can't burn the token. Sign-in page: `/signin`. Emails go through Resend
-(`RESEND_API_KEY`, `GIFT_FROM_EMAIL`).
-
-Env vars: `BETTER_AUTH_SECRET`, `DATABASE_URL` (pooled), `BETTER_AUTH_URL`.
-
-Migration (run before deploying, against each Neon branch, using the unpooled URL):
+Better Auth, email magic links only (`emailAndPassword` is disabled). Users,
+sessions, hashed verification tokens, and the database rate limiter live in
+Neon (`pg` Pool on the pooled `DATABASE_URL`). Apply both SQL files before
+deploy, against each Neon branch, using the unpooled URL. Neither file runs
+on first query:
 
 ```sh
 psql "$DATABASE_URL_UNPOOLED" -f migrations/0001_pro_auth.sql
+psql "$DATABASE_URL_UNPOOLED" -f migrations/0002_pro_subscriptions.sql
 ```
 
-`hasPro(userId)` in `src/lib/auth/entitlements.ts` reads the `entitlements`
-table. Nothing writes to it yet, so it returns false; Pro stays hidden.
+`0001` creates `"user"`, `"session"`, `"account"` (the table exists; no
+password is stored), `"verification"`, `"rateLimit"`, and `entitlements`.
+`0002` adds the Stripe columns on `entitlements` and the
+`stripe_subscription_events` table. One-time `orders` still bootstrap
+themselves; see `PAYMENTS.md`.
+
+Sign-in page: `/signin`. The email links to `/auth/confirm`, a page with one
+button that POSTs `/api/auth-confirm`, so a scanner prefetch cannot burn the
+token. Emails use `RESEND_API_KEY` and `GIFT_FROM_EMAIL` and throw when either
+is missing, so the form reports the failure. Gift emails log and continue;
+sign-in emails do not. Sessions last 30 days and refresh when older than a
+day.
+
+`AuthIndicator` on the home page calls `getSessionUser`. When `DATABASE_URL`
+or `BETTER_AUTH_SECRET` is unset, that function returns null and the header
+stays "Sign in". `POST /api/pro/checkout` then answers 401 `sign_in_required`
+for the same reason.
+
+`hasPro(userId)` in `src/lib/auth/entitlements.ts` is true only for
+`plan = 'pro'` with status `active`, `trialing`, or `past_due`, and
+`current_period_end` null or still in the future. The subscription webhook is
+what upserts that row. No route calls `hasPro`, and `SubscriptionContext` does
+not read it, so a production page still treats every visitor as free.
+
 Node 22 is pinned (`engines`, `.nvmrc`).
 
 ## Gemini proxy contract (Android)
@@ -180,7 +212,7 @@ src/
   routes/
     __root.tsx     # HTML shell: <head>, fonts, canonical/og tags, SubscriptionProvider
     index.tsx      # the landing page ("/")
-    api/           # checkout, stripe-webhook, order, reading
+    api/           # checkout, webhooks, order, reading, gemini, auth, pro
   components/      # card-face, reading-panel, pricing, PremiumGate, Journal, …
   context/
     SubscriptionContext.tsx  # Pro flag; production always off, dev localStorage only
