@@ -57,7 +57,9 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     return [{ token, created: true }];
   }
   if (q.startsWith("with burned as ( update gift_claims")) {
-    const [token, readingId, payload] = values as [string, string, string];
+    const token = values[0] as string;
+    const readingId = values.at(-2) as string;
+    const payload = values.at(-1) as string;
     const c = claims.find((x) => x.token === token && !x.claimed);
     if (!c) return [{ order_id: null, reading_id: null }];
     c.claimed = true;
@@ -130,6 +132,21 @@ async function query(strings: TemplateStringsArray, ...values: unknown[]): Promi
     }
     return [{ order_id: values[0] }];
   }
+  if (q.startsWith("select c.token as stored_token")) {
+    const c = claims.find((x) => x.token === values[0] || x.token === values[1]);
+    if (!c || order.status !== "paid") return [];
+    return [
+      {
+        stored_token: c.token,
+        order_id: c.order_id,
+        claimed: c.claimed,
+        paid_at: new Date(),
+        claim_created_at: new Date(),
+        sender_name: "Sam",
+        note: null,
+      },
+    ];
+  }
   if (q.startsWith("select 1 from gift_claims where token")) {
     return claims.some((c) => c.token === values[0]) ? [{}] : [];
   }
@@ -199,6 +216,7 @@ beforeEach(() => {
   vi.resetAllMocks();
   access.checkOrderAccess.mockResolvedValue("granted");
   process.env.STRIPE_WEBHOOK_SECRET = "whsec_test";
+  process.env.GIFT_TOKEN_SECRET = "test-secret-not-real";
   delete process.env.PUBLIC_SITE_URL;
   order = { id: ORDER, sku: "giftReading", status: "pending", credits: 1, recipient_email: "friend@example.com" };
   claims = [];
@@ -224,7 +242,8 @@ describe("poll-before-webhook race", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     expect((await handleStripeWebhook(webhook())).status).toBe(200);
     expect(claims).toHaveLength(1);
-    const url = `https://divine.example/claim/${claims[0].token}`;
+    const url = (mocks.sendGiftEmail.mock.calls[0][0] as { claimUrl: string }).claimUrl;
+    expect(url).toMatch(/\/claim\/[0-9a-f]{32}$/);
     expect(mocks.sendGiftEmail).toHaveBeenCalledTimes(1);
     expect(mocks.sendGiftEmail).toHaveBeenCalledWith(
       expect.objectContaining({ to: "friend@example.com", claimUrl: url }),
@@ -276,13 +295,29 @@ describe("token minted outside the webhook first", () => {
   });
 });
 
+describe("no gift token secret", () => {
+  test("the webhook fails closed with 500 (Stripe retries) and stores no token", async () => {
+    delete process.env.GIFT_TOKEN_SECRET;
+    delete process.env.BETTER_AUTH_SECRET;
+    order.status = "paid";
+    mocks.markPaid.mockResolvedValue("applied");
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await handleStripeWebhook(webhook());
+    expect(res.status).toBe(500);
+    expect(claims).toHaveLength(0);
+    expect(mocks.sendGiftEmail).not.toHaveBeenCalled();
+    expect(mocks.sendGiftBuyerEmail).not.toHaveBeenCalled();
+  });
+});
+
 describe("atomic claim", () => {
   test("burn, credit and reading happen in one statement; a second claim gets nothing", async () => {
     order.status = "paid";
     mocks.markPaid.mockResolvedValue("applied");
     vi.spyOn(console, "warn").mockImplementation(() => {});
     await handleStripeWebhook(webhook());
-    const token = claims[0].token;
+    const link = ((await (await poll()).json()) as { claimUrl: string }).claimUrl;
+    const token = link.slice(link.lastIndexOf("/") + 1);
 
     expect(await claimGift(token, { card: "the-star" })).toEqual({ ok: true });
     expect(await claimGift(token, { card: "the-moon" })).toEqual({ ok: false, reason: "already_claimed" });

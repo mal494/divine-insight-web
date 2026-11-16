@@ -180,7 +180,65 @@ A gift is the one SKU with something to deliver, so it has an extra leg:
    so it keeps working as a keepsake.
 
 The token is the recipient's only credential - no account, no sign-in. It is
-128 bits of randomness and is not derivable from the order id.
+128 bits, derived as HMAC-SHA256(`GIFT_TOKEN_SECRET`, falling back to
+`BETTER_AUTH_SECRET`, over the order id), so it is not guessable from the order
+id. The database stores only its SHA-256 hash; the server re-derives the link
+to show the buyer. Legacy rows that still hold a plaintext token keep working
+(lookups try the hash first, then the plaintext). With no secret at all the
+mint FAILS CLOSED: the webhook answers 500 and Stripe retries, so no fresh
+plaintext token is ever stored.
+`scripts/backfills/2026-11-gift-claim-token-hashing.sql` optionally hashes the
+legacy rows (run by hand, only after the hashed-token code is stable).
+
+**`BETTER_AUTH_SECRET` fallback: risk.** Set a dedicated `GIFT_TOKEN_SECRET`.
+When it is unset, gift links are derived from `BETTER_AUTH_SECRET`, which
+couples gifts to sign-in:
+- **Rotating the auth secret** (routine, or after a sign-in incident) does
+  *not* break links that were already sent: the database stores the hash of
+  the link actually issued. What it does break, for every unclaimed gift
+  minted before the rotation:
+  - the buyer's confirmation view can no longer re-show the link (`claimUrl`
+    is omitted);
+  - a webhook retry can no longer re-send the emails (logged as "not
+    re-derivable"; support must resend by hand).
+
+  Rotating `GIFT_TOKEN_SECRET` has the same effect, so set it once, before
+  the first hashed gift is minted, and don't rotate it casually.
+- **A leaked auth secret** would let anyone derive the claim link of any gift
+  whose order id they know. Order ids appear in Stripe redirect URLs and the
+  buyer's browser storage. A dedicated secret limits that blast radius to
+  gifts.
+- Switching from the fallback to a new `GIFT_TOKEN_SECRET` later is itself a
+  rotation (see above). The cheapest moment is before go-live.
+
+**Legacy plaintext links: plan and window.** Rows minted before this change
+store the 32-hex token in plain text.
+- **Window:** from deploying this code until the hashing backfill runs, those
+  links work via the plaintext fallback in `findClaim`, and anyone with read
+  access to `gift_claims` can use them. That includes DB backups and Neon
+  preview branches copied from production.
+- **Plan:**
+  1. Deploy this code. Every new gift is stored hashed.
+  2. Wait until a rollback is off the table (suggest 7 days): older code can't
+     read hashed rows.
+  3. If #32's mint backfill (`2026-11-gift-claim-tokens.sql`) is needed, run
+     it first, because it writes plaintext.
+  4. Run `2026-11-gift-claim-token-hashing.sql` (dry-run counts first). Legacy
+     links **keep working** afterwards, because lookup hashes the token in the
+     link. Only the buyer view stops re-showing older unclaimed links.
+  5. Confirm `select count(*) from gift_claims where token ~ '^[0-9a-f]{32}$'`
+     is 0, then remove the plaintext fallback (`or c.token = ${token}`) in a
+     follow-up PR, which closes the window for good.
+- **Optional:** `GIFT_TOKEN_TTL_DAYS` also expires old unclaimed legacy
+  links.
+- Steps 3–5 need Michael's OK. Nothing is run automatically.
+
+Expiry is OFF by default. `GIFT_TOKEN_TTL_DAYS` (a positive number of days)
+turns it on: an UNCLAIMED link then expires that many days after purchase and
+shows "This gift link has expired" with a contact-support prompt
+(`GIFT_SUPPORT_EMAIL`, optional, adds a mailto button). Claimed gifts never
+expire. Expired or problem gifts are handled by support manually (reissue or
+refund); there is no automated refund.
 
 Email delivery failures are logged, never thrown. The payment is already good
 by that point, and a non-2xx would make Stripe retry the charge event for days
@@ -197,6 +255,9 @@ over an email problem.
 | `GIFT_EMAIL_MAX_ATTEMPTS` | Optional. Failed gift-email sends before giving up (integer 1-100, default 5). |
 | `GIFT_EMAIL_GIVE_UP_HOURS` | Optional. Stop retrying gift emails this many hours after payment (0-72, default 6). |
 | `PUBLIC_SITE_URL` | Optional. The origin used to build claim links; falls back to the request's own origin. |
+| `GIFT_TOKEN_SECRET` | Strongly recommended (dedicated, >= 32 chars). Secret for deriving gift claim tokens; falls back to `BETTER_AUTH_SECRET` (see the fallback risk above). Rotating either one does not break links already sent, but the buyer view and webhook retries can no longer re-show or re-send unclaimed ones. |
+| `GIFT_TOKEN_TTL_DAYS` | Optional. Unset = gift links never expire (current policy). A positive number = unclaimed links expire that many days after purchase. |
+| `GIFT_SUPPORT_EMAIL` | Optional. Shown as a contact button on the expired-gift page. |
 
 `go-live.sh` now fails fast if `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`, or
 `GIFT_FROM_EMAIL` is missing, and injects those values into the deployment with

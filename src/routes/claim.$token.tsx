@@ -40,7 +40,12 @@ type Claim = {
   reading: { card?: { id: string; name: string }; line?: string } | null;
 };
 
-type Status = "loading" | "ready" | "drawing" | "done" | "missing" | "error";
+type Status = "loading" | "ready" | "drawing" | "done" | "missing" | "expired" | "error";
+
+/** Copy for an unclaimed link past GIFT_TOKEN_TTL_DAYS. Exported for tests. */
+export const EXPIRED_TITLE = "This gift link has expired";
+export const EXPIRED_BODY =
+  "Please contact support and we'll reissue it for you — the gift itself isn't lost.";
 
 function ClaimPage() {
   const { token } = Route.useParams();
@@ -48,6 +53,7 @@ function ClaimPage() {
   const [status, setStatus] = useState<Status>("loading");
   const [card, setCard] = useState<TarotCard | null>(null);
   const [revealed, setRevealed] = useState(false);
+  const [supportEmail, setSupportEmail] = useState<string | null>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   useEffect(() => {
@@ -63,6 +69,12 @@ function ClaimPage() {
         if (cancelled) return;
         if (res.status === 404) {
           setStatus("missing");
+          return;
+        }
+        if (res.status === 410) {
+          const body = (await res.json().catch(() => ({}))) as { supportEmail?: string };
+          setSupportEmail(typeof body.supportEmail === "string" ? body.supportEmail : null);
+          setStatus("expired");
           return;
         }
         if (!res.ok) {
@@ -132,11 +144,11 @@ function ClaimPage() {
       {status === "missing" && (
         <>
           <h1 className="font-display text-3xl font-medium tracking-[0.08em] text-cream-50">
-            This link has expired
+            We couldn&rsquo;t find this gift
           </h1>
           <p className="mt-4 max-w-md text-sm leading-relaxed text-cream-100/60">
-            We couldn&rsquo;t find a gift for this link. If someone sent it to
-            you recently, ask them to check the address they used.
+            We couldn&rsquo;t find a gift for this link. Check that the whole
+            link was copied, or ask the person who sent it to share it again.
           </p>
           <a
             href="/"
@@ -146,6 +158,8 @@ function ClaimPage() {
           </a>
         </>
       )}
+
+      {status === "expired" && <ExpiredGift supportEmail={supportEmail} />}
 
       {status === "error" && (
         <p className="text-sm text-cream-100/60">
@@ -227,5 +241,33 @@ function ClaimPage() {
         </>
       )}
     </main>
+  );
+}
+
+/** Friendly view for an expired, unclaimed gift link. */
+export function ExpiredGift({ supportEmail }: { supportEmail: string | null }) {
+  return (
+    <>
+      <h1 className="font-display text-3xl font-medium tracking-[0.08em] text-cream-50">
+        {EXPIRED_TITLE}
+      </h1>
+      <p className="mt-4 max-w-md text-sm leading-relaxed text-cream-100/60">
+        {EXPIRED_BODY}
+      </p>
+      {supportEmail && (
+        <a
+          href={`mailto:${supportEmail}?subject=${encodeURIComponent("Expired gift link")}`}
+          className="mt-6 inline-flex items-center gap-2 rounded-full border border-gold-500/50 px-7 py-3 text-xs tracking-[0.14em] text-gold-300 uppercase transition hover:border-gold-400/80 hover:bg-gold-500/10"
+        >
+          Contact support
+        </a>
+      )}
+      <a
+        href="/"
+        className="mt-4 inline-flex items-center gap-2 rounded-full border border-gold-500/30 px-7 py-3 text-xs tracking-[0.14em] text-gold-300/80 uppercase transition hover:bg-gold-500/10"
+      >
+        Draw a free reading
+      </a>
+    </>
   );
 }

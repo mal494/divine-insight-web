@@ -159,7 +159,7 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
   }
 
   if (gift) {
-    let claim: { token: string; created: boolean };
+    let claim: Awaited<ReturnType<typeof createGiftClaim>>;
     try {
       claim = await createGiftClaim(orderId);
     } catch (err) {
@@ -185,6 +185,12 @@ export async function handleStripeWebhook(request: Request): Promise<Response> {
     //    the crash came after Resend accepted it).
     // This block runs on EVERY paid outcome ("applied", "already-paid",
     // "duplicate"), so a retry after any crash finishes the job.
+    if (!claim.token) {
+      // Existing hashed token that can no longer be re-derived (secret
+      // rotated): the recipient's link still works; support can resend.
+      console.error("gift claim link not re-derivable; emails skipped", { orderId });
+      return new Response(result, { status: 200 });
+    }
     const claimUrl = claimUrlFor(claim.token, request.url);
     const buyerEmail = session.customer_details?.email ?? session.customer_email ?? null;
     if (!giftEmailConfigured()) {
